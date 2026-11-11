@@ -65,7 +65,7 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'call_stubbed';
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'call_stubbed' | 'stub_dropped';
 }
 
 export interface HistoryToolCall {
@@ -144,6 +144,8 @@ export interface CompactResult {
     resultsDropped: number;
     callsDropped: number;
     callsStubbed: number;
+    /** Calls an earlier compaction had already stubbed, deleted this time. */
+    stubsDropped: number;
     pinned: number;
     stateTokens: number;
     /** Which fitting stage the state needed, '' when no request was made. */

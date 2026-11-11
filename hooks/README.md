@@ -12,7 +12,10 @@ every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
 item is kept when Jev's probability reaches `keepThreshold`; a dropped result
 is truncated to its first `truncateHeadChars` characters plus a one-line note,
-and a dropped call disappears with its result.
+and a dropped call becomes a stub - its tool name, with input and result cut
+the same way - unless `dropCalls` is on, when it disappears with its result. A
+call an earlier compaction already stubbed is deleted, so a stub lasts one
+compaction.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),
@@ -31,7 +34,7 @@ hooks surface before installing or loading it:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export TYPESAFE_API_KEY="<your TypeSafe key>"
 
-claude plugin marketplace add tamaratran/fast-jev-compaction
+claude plugin marketplace add jlenzkes/fast-jev-compaction
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
@@ -52,6 +55,7 @@ The plugin declares these `userConfig` values in
 | `preserveRecentMessages` | `6` |
 | `compactAtPercent` | `60` |
 | `minReductionRatio` | `0.25` |
+| `dropCalls` | `false` |
 | `maxStateTokens` | `25000` |
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |

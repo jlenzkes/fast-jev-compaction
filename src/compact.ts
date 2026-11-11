@@ -100,10 +100,19 @@ export function batchCalls(
   return batches;
 }
 
+/**
+ * `alreadyStub` marks a call an earlier compaction already cut to a stub
+ * (see `alreadyStubbed`). Stubbing it again would cut nothing, so when Jev
+ * still rates it as no longer needed it is deleted: a stub lasts one
+ * compaction. Without this, stubs pile up across compactions, each pass has
+ * less it can cut, and a long session's compaction ends below
+ * `minReductionRatio` and falls back to the built-in summary.
+ */
 export function decideCall(
   call: Pick<ToolCall, 'id' | 'tool' | 'pinned'>,
   answer: CallAnswer,
   options: Pick<ResolvedCompactOptions, 'keepThreshold'> & Partial<Pick<ResolvedCompactOptions, 'dropCalls'>>,
+  alreadyStub = false,
 ): CallDecision {
   const base = { id: call.id, tool: call.tool, ...answer };
   if (call.pinned) return { ...base, action: 'keep', reason: 'pinned' };
@@ -114,6 +123,7 @@ export function decideCall(
     return { ...base, action: 'drop_result', reason: 'result_dropped' };
   }
   if (options.dropCalls === false) {
+    if (alreadyStub) return { ...base, action: 'drop_call', reason: 'stub_dropped' };
     return { ...base, action: 'stub_call', reason: 'call_stubbed' };
   }
   return { ...base, action: 'drop_call', reason: 'call_dropped' };
@@ -135,6 +145,36 @@ async function askBatch(
       },
     ]),
   );
+}
+
+const RESULT_NOTE = /\[fast-jev-compaction truncated \d+ chars of this tool result/;
+
+/**
+ * The ids of calls an earlier compaction already cut: the result carries this
+ * plugin's truncation note, and the input is either already cut to
+ * `input_head` and `note` or short enough that stubbing leaves it as it is.
+ */
+export function alreadyStubbed(
+  messages: readonly Message[],
+  calls: readonly ToolCall[],
+  headChars: number,
+): Set<string> {
+  const results = new Map<string, string>();
+  for (const message of messages) {
+    for (const result of message.toolResults ?? []) results.set(result.tool_use_id, result.text);
+    for (const tool of message.toolUses) {
+      if (tool.text !== undefined && !results.has(tool.tool_use_id)) results.set(tool.tool_use_id, tool.text);
+    }
+  }
+  const ids = new Set<string>();
+  for (const call of calls) {
+    if (!RESULT_NOTE.test(results.get(call.tool_use_id) ?? '')) continue;
+    const keys = Object.keys(call.input).sort().join(',');
+    if (keys === 'input_head,note' || truncatedInput(call.input, headChars) === call.input) {
+      ids.add(call.id);
+    }
+  }
+  return ids;
 }
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
@@ -296,8 +336,14 @@ export async function compact(
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }
 
+  const stale = alreadyStubbed(messages, calls, resolved.truncateHeadChars);
   const decisions = calls.map((call) =>
-    decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
+    decideCall(
+      call,
+      answers.get(call.id) ?? { keepCall: 1, keepResult: 1 },
+      resolved,
+      stale.has(call.id),
+    ),
   );
   const kept = applyDecisions(
     messages,
@@ -318,6 +364,7 @@ export async function compact(
       resultsDropped: count(decisions, 'result_dropped'),
       callsDropped: count(decisions, 'call_dropped'),
       callsStubbed: count(decisions, 'call_stubbed'),
+      stubsDropped: count(decisions, 'stub_dropped'),
       pinned: count(decisions, 'pinned'),
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,

@@ -1,6 +1,6 @@
 # fast-jev-compaction
 
-> **This is a fork** of tamaratran/fast-jev-compaction with three changes: a reopened session keeps its compaction, and a dropped tool call leaves a stub, on by default. See [FORK.md](FORK.md) for what and why.
+> **This is a fork** of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction): a reopened session keeps its compaction, a dropped tool call leaves a stub by default, and a stub lasts one compaction. Install it from this repository ([Install in Claude Code](#install-in-claude-code)); [FORK.md](FORK.md) says what changed and why.
 
 Claude Code plugin that replaces the compaction summary with Jev decisions:
 every tool call and result is scored in one fast request, stale ones are
@@ -112,6 +112,7 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `dropCalls` | `true` in the library, `false` in the plugin | `false` turns a call Jev rates as no longer needed into a stub (tool name, input and result cut to `truncateHeadChars`) instead of deleting it; a call an earlier compaction already stubbed is deleted |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -148,9 +149,32 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
+claude plugin marketplace add jlenzkes/fast-jev-compaction
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
+
+**Switching from the upstream plugin.** Both repositories name their
+marketplace `fast-jev-compaction`, so remove the upstream one first; the plugin
+keeps its options:
+
+```sh
+claude plugin marketplace remove fast-jev-compaction
+claude plugin marketplace add jlenzkes/fast-jev-compaction
+claude plugin install fast-jev-compaction@fast-jev-compaction
+```
+
+**Updating.** Pull this repository's newest version, then restart Claude Code
+or run `/reload-plugins`:
+
+```sh
+claude plugin marketplace update fast-jev-compaction
+claude plugin update fast-jev-compaction@fast-jev-compaction
+```
+
+**Checking which copy is installed.** `claude plugin list` shows the version;
+the cache under `~/.claude/plugins/cache/fast-jev-compaction/` holds one
+directory per version, and the fork's copy of `hooks/fast-jev.ts` contains
+`keepsHandle`.
 
 The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.

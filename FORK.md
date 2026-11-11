@@ -12,6 +12,14 @@ Based on upstream `e3f262a7` (main as of 18 Sep 2026). Upstream's history is unt
 
 **3. Stubs are the default.** PR #83 keeps deleting by default; this fork defaults `dropCalls` to `false`. A compaction that deletes calls leaves the model's own earlier reports with nothing behind them, and a session then repeats claims whose evidence is gone. An explicit `dropCalls` option still wins.
 
+**4. A stub lasts one compaction.** A call an earlier compaction already cut to a stub - its result is this plugin's truncation note, and its input is already cut or short - is deleted when Jev still rates it as no longer needed (decision `stub_dropped`). Stubbing it again would cut nothing, so without this, stubs pile up: each compaction of a long session has less it can cut, until it falls under `minReductionRatio` and hands over to the built-in summary, and the session loses its verbatim history. Seen on 11 Nov 2026 in one session's fifth compaction, the second with stubs on: 411 calls stubbed, a 25% reduction against the 25% minimum, four Jev requests thrown away, then an 89-second built-in summary in place of the sub-second compactions before it. Jev is still asked about every stub, and a stub it rates as still needed stays.
+
+The plugin's tests were brought in line with changes 1 and 3, which upstream's tests still assert against.
+
+## Install
+
+See [Install in Claude Code](README.md#install-in-claude-code) in the README, including how to switch from the upstream plugin and how to update.
+
 ## Deliberately not taken
 
 - **Upstream PR #139** gives rebuilt messages their handles back, which undoes change 1.
@@ -24,4 +32,4 @@ git fetch upstream
 git merge upstream/main
 ```
 
-Then check that `keepsHandle` and the `dropCalls` default of `false` survived the merge, in `hooks/fast-jev.ts` and `.claude-plugin/plugin.json`.
+Then check that `keepsHandle`, the `dropCalls` default of `false` and `alreadyStubbed` survived the merge, in `hooks/fast-jev.ts`, `.claude-plugin/plugin.json` and `src/compact.ts`, and run `npm test`. Bump the version in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` together, or `claude plugin update` will not see the change.

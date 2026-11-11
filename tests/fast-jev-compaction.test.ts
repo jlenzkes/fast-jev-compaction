@@ -299,6 +299,44 @@ describe('decisions', () => {
     expect(out[2]!.toolResults![0]!.text).toMatch(/truncated \d+ chars of this tool result/);
   });
 
+  it('deletes a call an earlier compaction already stubbed: a stub lasts one compaction', async () => {
+    const long = 'x'.repeat(2000);
+    const messages: Message[] = [
+      { role: 'user', text: 'go', toolUses: [] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: { command: long } }] },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'u1', text: long }] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u2', tool: 'Read', input: { file_path: 'a.ts' } }] },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'u2', text: long }] },
+      { role: 'assistant', text: 'done', toolUses: [] },
+    ];
+    const options = { preserveRecentMessages: 1, dropCalls: false };
+    const first = await compact(messages, fakeJev(() => 0.1, []), options);
+    expect(first.decisions.map((d) => d.reason)).toEqual(['call_stubbed', 'call_stubbed']);
+    expect(first.messages).toHaveLength(messages.length);
+
+    // The second pass sees the stubs: both were cut already (one input cut to
+    // input_head, one short input left as it was), so neither can shrink again.
+    const second = await compact(first.messages, fakeJev(() => 0.1, []), options);
+    expect(second.decisions.map((d) => d.reason)).toEqual(['stub_dropped', 'stub_dropped']);
+    expect(second.stats.stubsDropped).toBe(2);
+    expect(second.messages.map((m) => m.text)).toEqual(['go', 'done']);
+    expect(reductionRatio(second)).toBeGreaterThan(0.5);
+
+    // A stub Jev still rates as needed stays.
+    const kept = await compact(first.messages, fakeJev(() => 0.9, []), options);
+    expect(kept.decisions.map((d) => d.action)).toEqual(['keep', 'keep']);
+
+    // A short call whose result was never cut is not a stub, so it is stubbed, not deleted.
+    const short: Message[] = [
+      { role: 'user', text: 'go', toolUses: [] },
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u3', tool: 'Read', input: { file_path: 'b.ts' } }] },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'u3', text: 'ok' }] },
+      { role: 'assistant', text: 'done', toolUses: [] },
+    ];
+    const fresh = await compact(short, fakeJev(() => 0.1, []), options);
+    expect(fresh.decisions.map((d) => d.reason)).toEqual(['call_stubbed']);
+  });
+
   it('removes dropped calls and truncates dropped results', () => {
     const messages = transcript();
     messages[4]!.toolUses[0]!.text = 'x'.repeat(2000);

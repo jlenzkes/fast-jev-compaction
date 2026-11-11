@@ -125,10 +125,12 @@ function toolResultSummary(result: ToolResult): ToolResultSummary {
 }
 
 /**
- * Maps the library's output back onto session messages. Whatever came back
- * unchanged (a message, a tool use, a tool result) is the engine's own object,
- * handle included; anything rebuilt is a fresh message without a handle, so the
- * engine takes the edited content instead of its original.
+ * Maps the library's output back onto session messages. A plain user message
+ * that came back unchanged is the engine's own object, handle included; every
+ * other message is a fresh message without a handle, reusing the engine's own
+ * tool uses and results where they came back unchanged. A handle is what a
+ * reopen follows back to the stored transcript, so a message that kept one
+ * would bring the uncompacted history back with it (`keepsHandle`).
  */
 export function toSessionMessages(
   input: readonly SessionMessage[],
@@ -186,6 +188,7 @@ export function summarize(result: CompactResult): string {
     stats.resultsDropped > 0 ? `${stats.resultsDropped} results truncated` : '',
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.callsStubbed > 0 ? `${stats.callsStubbed} call_stubbed` : '',
+    stats.stubsDropped > 0 ? `${stats.stubsDropped} stub_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
