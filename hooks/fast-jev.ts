@@ -141,7 +141,7 @@ export function toSessionMessages(
   }
   return output.map((message) => {
     const own = messages.get(message);
-    if (own) return own;
+    if (own && keepsHandle(own)) return own;
     const rebuilt: SessionMessage = {
       role: message.role,
       text: message.text,
@@ -308,3 +308,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
 };
 
 export { resolveOptions };
+
+function keepsHandle(message: SessionMessage): boolean {
+  return message.role === 'user' && !message.toolResults?.length;
+}
