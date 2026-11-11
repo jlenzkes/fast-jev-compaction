@@ -76,7 +76,12 @@ reduction, per-reason counts, state size and request count; a per-call
 `decisions:` line with both probabilities is logged for diagnosis. The
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
-in-flight guard.
+in-flight guard. A host that runs Claude Code as an SDK session (VS Code, the
+desktop app, `claude -p`) refuses that request; there the hook toasts
+`context at N%: type /compact at a natural stopping point` once when context
+crosses `compactAtPercent`, and again each further 10 points, instead of
+logging a refusal on every turn. A compaction, or context falling back below
+the threshold, starts the count again.
 
 ## Scope and caveat
 

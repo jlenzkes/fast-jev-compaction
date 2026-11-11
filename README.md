@@ -184,6 +184,12 @@ auto-compaction) goes through Jev: the toast reads
 replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
 could not remove enough (short sessions, or when it fails).
 
+In VS Code and the desktop app the plugin cannot start a compaction itself, so
+when context reaches `compactAtPercent` it toasts
+`context at N%: type /compact at a natural stopping point` - once, then again
+each further 10 points. Type `/compact` as a message on its own; inside other
+text it does not run.
+
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.

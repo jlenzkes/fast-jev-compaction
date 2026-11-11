@@ -250,6 +250,24 @@ async function getApiKey(
   return undefined;
 }
 
+/** Points of further context growth between two compaction nudges. */
+export const NUDGE_STEP = 10;
+
+interface NudgeState {
+  /** Context percent at the last nudge; -Infinity when none is owed a repeat. */
+  nudgedAt: number;
+}
+
+/** Tell the user to /compact, at most once per NUDGE_STEP points of growth. */
+function nudgeCompact($: Parameters<typeof notify>[0], state: NudgeState, percent: number): void {
+  if (percent < state.nudgedAt + NUDGE_STEP) return;
+  state.nudgedAt = percent;
+  notify(
+    $,
+    `context at ${Math.round(percent)}%: type /compact at a natural stopping point (auto-compact cannot run in this host)`,
+  );
+}
+
 function notify(
   $: {
     ui: {
@@ -266,8 +284,15 @@ function notify(
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
+  // A host that runs Claude Code as an SDK session (VS Code, the desktop app,
+  // `claude -p`) refuses $.session.compact. There the hook nudges instead of
+  // failing on every turn: once when context crosses compactAtPercent, then
+  // again each NUDGE_STEP points, so the user picks the moment to /compact.
+  let cannotCompact = false;
+  const nudges: NudgeState = { nudgedAt: Number.NEGATIVE_INFINITY };
 
   on('session.compact', async ($, event, next) => {
+    nudges.nudgedAt = Number.NEGATIVE_INFINITY;
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
@@ -298,15 +323,28 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting) return next(event);
+    let percent = 0;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
+      percent = context.percent ?? 0;
+      if (percent < configured.compactAtPercent) {
+        nudges.nudgedAt = Number.NEGATIVE_INFINITY;
+        return next(event);
+      }
+      if (cannotCompact) {
+        nudgeCompact($, nudges, percent);
+        return next(event);
+      }
       compacting = true;
       await $.session.compact();
     } catch (error) {
-      $.ui.log(
-        `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('headless')) {
+        cannotCompact = true;
+        nudgeCompact($, nudges, percent);
+      } else {
+        $.ui.log(`auto-compact skipped (${message})`);
+      }
     } finally {
       compacting = false;
     }

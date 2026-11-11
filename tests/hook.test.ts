@@ -3,6 +3,7 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  register,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -154,5 +155,106 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('auto-compact on turn.complete', () => {
+  type Handler = (...args: any[]) => Promise<unknown>;
+  const HEADLESS = '$.session.compact: not available in a headless (-p / SDK) session yet';
+
+  function setup(compact: () => Promise<void>) {
+    const handlers: Record<string, Handler> = {};
+    const logs: string[] = [];
+    const toasts: string[] = [];
+    let percent = 0;
+    let compactCalls = 0;
+    const $ = {
+      session: {
+        usage: async () => ({ context: { percent } }),
+        compact: () => {
+          compactCalls += 1;
+          return compact();
+        },
+      },
+      ui: { log: (text: string) => logs.push(text), toast: (text: string) => toasts.push(text) },
+      http: { fetch: async () => ({ status: 500, ok: false, text: 'x' }) },
+    };
+    (register as any)((name: string, handler: Handler) => (handlers[name] = handler), {});
+    const next = async (event: unknown) => event;
+    return {
+      logs,
+      toasts,
+      compactCalls: () => compactCalls,
+      turn: (at: number) => {
+        percent = at;
+        return handlers['turn.complete']!($, {}, next);
+      },
+      compactEvent: () => handlers['session.compact']!($, { messages: [] }, next),
+    };
+  }
+
+  const headless = () => Promise.reject(new Error(HEADLESS));
+
+  it('nudges once when a headless host refuses, and stops asking it to compact', async () => {
+    const t = setup(headless);
+    await t.turn(61);
+    await t.turn(62);
+    await t.turn(65);
+    expect(t.toasts).toEqual([
+      'context at 61%: type /compact at a natural stopping point (auto-compact cannot run in this host)',
+    ]);
+    expect(t.logs.some((line) => line.includes('auto-compact skipped'))).toBe(false);
+    expect(t.compactCalls()).toBe(1);
+  });
+
+  it('nudges again after context grows another step', async () => {
+    const t = setup(headless);
+    await t.turn(61);
+    await t.turn(70);
+    await t.turn(71);
+    await t.turn(82);
+    expect(t.toasts.map((text) => text.slice(0, 14))).toEqual([
+      'context at 61%',
+      'context at 71%',
+      'context at 82%',
+    ]);
+  });
+
+  it('nudges afresh after a compaction or a drop below the threshold', async () => {
+    const t = setup(headless);
+    await t.turn(61);
+    await t.compactEvent();
+    await t.turn(62);
+    await t.turn(40);
+    await t.turn(63);
+    // The compaction itself toasts its own outcome; only the nudges matter here.
+    const nudges = t.toasts.filter((text) => text.startsWith('context at'));
+    expect(nudges.map((text) => text.slice(0, 14))).toEqual([
+      'context at 61%',
+      'context at 62%',
+      'context at 63%',
+    ]);
+  });
+
+  it('stays quiet below the threshold', async () => {
+    const t = setup(headless);
+    await t.turn(59);
+    expect(t.toasts).toEqual([]);
+    expect(t.compactCalls()).toBe(0);
+  });
+
+  it('compacts without a nudge where the host allows it', async () => {
+    const t = setup(async () => undefined);
+    await t.turn(61);
+    await t.turn(62);
+    expect(t.compactCalls()).toBe(2);
+    expect(t.toasts).toEqual([]);
+  });
+
+  it('logs any other refusal as before', async () => {
+    const t = setup(() => Promise.reject(new Error('boom')));
+    await t.turn(61);
+    expect(t.logs).toEqual(['auto-compact skipped (boom)']);
+    expect(t.toasts).toEqual([]);
   });
 });
