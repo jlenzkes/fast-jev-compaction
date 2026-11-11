@@ -70,9 +70,9 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
   }
-  if (typeof options['dropCalls'] === 'boolean') {
-    numbers.dropCalls = options['dropCalls'];
-  }
+  // This fork: stub dropped calls unless an option says otherwise,
+  // so a session never reads its own reports with no call behind them (#65).
+  numbers.dropCalls = typeof options['dropCalls'] === 'boolean' ? options['dropCalls'] : false;
   const config: HookConfig = {
     ...numbers,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),

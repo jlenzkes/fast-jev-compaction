@@ -38,7 +38,7 @@
       "type": "boolean",
       "title": "Drop whole tool calls",
       "description": "When Jev rates a call as no longer needed, remove the call and its result. Off: keep the call and truncate only its result, so the history still shows a tool call before every report.",
-      "default": true
+      "default": false
     },
     "maxStateTokens": {
       "type": "number",
