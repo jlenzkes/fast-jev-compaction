@@ -35,7 +35,10 @@ built-in compaction summary with the original messages.
    `[… N chars omitted …]` note; old tool calls reduced to one line each
    (`t12 Read file_path=src/a.ts → ok 480ch`); old call-less messages left
    out; runs of old call-only messages folded into one entry. If it still
-   does not fit, compaction throws. Tokens are estimated without a tokenizer (a
+   does not fit (long sessions), the calls are asked in contiguous windows,
+   halved until each window's state fits: a window keeps the goal, the first
+   message, the pinned newest messages and its own messages in full. A call
+   whose window cannot fit even alone is not asked, so it stays. Tokens are estimated without a tokenizer (a
    word per six letters, half a token per digit, ~one per other symbol),
    calibrated to land a little above the counts Jev reports.
 4. For every non-pinned call Jev gets two `noul` questions: should the **call**
@@ -55,8 +58,8 @@ built-in compaction summary with the original messages.
    removed, untouched messages are returned as the same objects, and no result
    is ever left without its call.
 
-Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+Jev failures, malformed answers or a missing key
+throw; the caller (or the Claude Code hook) decides what to fall back to.
 
 ## Install and usage
 
