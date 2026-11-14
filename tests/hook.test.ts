@@ -61,6 +61,7 @@ describe('hook config', () => {
       model: 'jev-latest',
       dropCalls: false,
       note: true,
+      ignoredOptions: [],
       ...PUT_BACK_DEFAULTS,
     });
     expect(resolveHookConfig({ dropCalls: true }).dropCalls).toBe(true);
@@ -83,6 +84,7 @@ describe('hook config', () => {
       minReductionRatio: 0.25,
       dropCalls: false,
       note: true,
+      ignoredOptions: [],
       ...PUT_BACK_DEFAULTS,
     });
   });

@@ -106,16 +106,28 @@ does. In short:
   id>.jsonl`) from the last `compact_boundary`, or from the first line holding
   a listed handle when a built-in summary preserved messages before it. A
   listed message's handle is its record's `uuid`.
-- A file up to 4 MiB is read with `$.fs.read`. A larger one is read by a
-  constant script through `$.process.run`: Windows PowerShell
-  (`-EncodedCommand`) on Windows, `sh` and `awk` elsewhere. The path goes in
-  `FJC_PATH` and the handles on standard input, never in the script. The
-  script writes UTF-8 itself, blanks base64 image data, reports a line over
-  1 MiB by number only, and ends with an `END` line. On `more`, it runs again
-  from the line reached, up to 4 runs of 30 s each.
-- Each hidden record is walked by `parentUuid` past hidden and system records
-  to the listed message it sits beside. The walk stops at a message the
-  listing does not hold, and such deliveries are counted. A delivery whose
+- A file up to 4 MiB is read with `$.fs.read`. A larger one is read through
+  `$.process.run` by a constant script that only transports bytes: Windows
+  PowerShell (`-EncodedCommand`, by its full path under `%SystemRoot%`) on
+  Windows, `sh` elsewhere.
+  - The path, byte offset and length go in `FJC_PATH`, `FJC_OFFSET` and
+    `FJC_LENGTH`, never in the script.
+  - It prints the file's size and that slice in base64, nothing else.
+  - The hook asks for 3,000,000-byte slices from the end backwards, up to 4 in
+    flight and at most 8 runs of 30 s each, all below the size taken first.
+  - A slice of any other length than asked stands down.
+- Everything else happens once, in TypeScript:
+  - lines at `\n`, strict UTF-8, and `JSON.parse` of every line in the window;
+    a line that does not parse stands down, except an unterminated last one;
+  - the boundary, the handles and messages decided on parsed top-level fields.
+- Each hidden record is walked by `parentUuid` past every record that is not
+  a user or assistant message, whatever its type, to the listed message it
+  sits beside. The walk stops, counting the delivery, at:
+  - a message the listing does not hold;
+  - a record outside the window;
+  - a cycle.
+- One that reaches the chain's root without meeting a message is put back
+  first. A delivery whose
   message went back rebuilt or deleted is put back right after it (never
   between a tool call and its result); one whose message went back whole is
   the host's.
@@ -137,7 +149,7 @@ does. In short:
   - Task notices go back as one list, a line each (status and summary, at most
     `taskHeadChars`), after the last message one sat beside.
   - Host messages go back as one line, the label and what follows it.
-- Each put-back's first line is the plugin's and names its transcript line;
+- Each put-back's first line is the plugin's and names its transcript record (uuid);
   every delivered line is indented two spaces.
 - No put-backs, with the reason in the note and the toast, when:
   - the file is missing;
@@ -156,15 +168,20 @@ smaller as returned, Y% before put-backs; put-backs C chars, Z% of the
 saving; transcript read by <reader> in T ms; ...)`. If the put-backs would
 leave less than `minReductionRatio`, the hook falls back to the built-in
 summary instead. With `note` on, the handed-back history ends with one plain
-note (at most 24 lines and 4,000 characters). It covers what was cut, what was
-put back or shortened since the last compaction (each shortened one with its
-transcript line), and the transcript's path. Nothing recognises or removes it
-later. The plugin keeps nothing on disk.
+note (at most 24 lines and 4,000 characters), only when something sat beside a
+message.
+- It covers what was cut, and what was put back or shortened since the last
+  compaction, naming shortened reports first, as many as the cap allows.
+- It gives the transcript's path.
+- Nothing recognises or removes it later.
+
+The plugin keeps nothing on disk except the opt-in debug log below. Options
+that are not non-negative whole numbers are ignored, and the toast says so.
 
 For maintainers: set the environment variable `FAST_JEV_DEBUG_LOG` to a file
 path and each `session.compact` dispatch appends one JSON line of values the
 plugin computed - lengths, 32-bit hashes, tool ids, handles, roles, counts,
-transcript line numbers, the reader and its time - never text from a message. A length and a 32-bit
+record uuids, the reader, its runs and its time - never text from a message. A length and a 32-bit
 hash still identify a short common prompt such as "yes". It is off unless set.
 
 ## Scope and caveat

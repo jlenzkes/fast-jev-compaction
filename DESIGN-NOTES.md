@@ -12,8 +12,8 @@ them in `session.compact`'s list, and the host drops them when the message they 
 handle.
 
 The plugin therefore reads the session's transcript, the host's own `.jsonl`, at compaction time. From it, the plugin
-puts back what sat beside each message it rebuilt. It keeps no state between compactions, writes nothing to disk, and
-never recognises anything from an earlier compaction.
+puts back what sat beside each message it rebuilt. It keeps no state between compactions, writes nothing to disk
+(except an opt-in debug log, `FAST_JEV_DEBUG_LOG`), and never recognises anything from an earlier compaction.
 
 ## What it reads
 
@@ -23,40 +23,79 @@ never recognises anything from an earlier compaction.
    - The declarations call the handle "opaque" (READ). Equality is measured on one host version, not promised.
 2. **The file.** The path is derived: `<config>/projects/<cwd, non-alphanumerics as ->/<session id>.jsonl`. The hook's
    input carries none (READ), and the probe derived the file the host writes (RAN).
-3. **The window.** It reads from the last `compact_boundary`, or from the first line holding a listed handle when that
-   comes earlier.
+3. **The bytes: transport only, no interpretation outside TypeScript.**
+   - **Small files.** A file up to 4 MiB (by `$.fs.stat`) is read with `$.fs.read`, which rejects anything larger
+     (READ). At a real compaction the file was under 4 MiB at only 11 of 57 compactions in one project (RAN).
+   - **Larger files** are read through `$.process.run`, whose output is cut at 4,194,304 characters (RAN). The script
+     is a constant: Windows PowerShell under `-EncodedCommand` (started by its full path,
+     `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`; the bare name only when that file is absent), or
+     `sh -c` elsewhere.
+   - **What the script does.** It takes the path, a byte offset and a length from the environment (`FJC_PATH`,
+     `FJC_OFFSET`, `FJC_LENGTH`; never in its text). It prints the file's size on one line and exactly those bytes,
+     base64-encoded, on the next. It does nothing else: no filtering, no markers, no knowledge of the transcript's
+     format.
+   - **The size taken first bounds the read.** The plugin takes the file's size once and asks only for bytes below it;
+     what the host writes after that is the next compaction's.
+   - **Slices from the end backwards.** The plugin asks for slices of 3,000,000 bytes (4,000,000 base64 characters per
+     run), up to 4 runs in flight at once.
+   - **Every slice's length is checked exactly.** A slice that decodes to any other length than asked stands down: that
+     is the cut detection, with no sentinel to forge.
+   - **The ceiling is 8 runs** (about 24 MB, twice the largest real window). A window that needs more stands down with
+     "window too large to read".
+4. **One parser, in TypeScript.**
+   - **Lines.** The bytes are split into lines at `\n` (a `\r` before it is dropped). Each line is checked as strict
+     UTF-8; invalid bytes stand down.
+   - **Byte-order mark.** One at the very start of the file is dropped. Anywhere else, it is part of a line, and that
+     line does not parse.
+   - **Parsing.** Every complete line read is `JSON.parse`d. A line that does not parse stands down; that covers a
+     CR-only file, a NUL, and any damage. The one exception is an unterminated final line (the host mid-write), which is
+     ignored.
+   - **Every decision is made on parsed top-level fields**, never on a substring:
+     - the boundary is a record with `type: "system"` and `subtype: "compact_boundary"` and no `isSidechain: true`;
+     - a listed handle is found only as a record's own top-level `uuid`;
+     - a message is a `user` or `assistant` record that is not `isMeta`.
+5. **The window.** The plugin reads backwards until it has parsed the last boundary record and found every listed
+   handle; the window runs from the earlier of the two to the end.
    - After a built-in summary, the listing holds the summary's preserved messages under their **old** uuids, recorded
      before the boundary (RAN, probe 2: lines 60 and 61, boundary at 70). Those are the uuids its
      `compactMetadata.preservedMessages.uuids` names.
-4. **How the bytes are read.**
-   - A file up to 4 MiB is read with `$.fs.read`, which rejects anything larger (READ).
-   - At a real compaction the file was under 4 MiB at only 11 of 57 compactions in one project (RAN). Anything larger is
-     read with `$.process.run`, whose output is cut at 4,194,304 characters (RAN).
-   - The reader is a **constant** script: Windows PowerShell under `-EncodedCommand`, or `sh -c` with awk elsewhere.
-     PowerShell is started by its full path, `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, so no
-     PATH entry or file in the working directory decides what runs; the bare name is used only when that file is
-     absent.
-     The path reaches it in `FJC_PATH` and the handles on standard input, never in the script's text.
-5. **What the reader prints.**
-   - The script writes UTF-8 itself, through a stream writer over standard output. Windows PowerShell 5.1's own stdout
-     is IBM437: 61 of 1,040 lines altered, and every one still parsed (RAN by the reviewer).
-   - It prints every line holding `"type":"attachment"`, `"isMeta":true` or `"type":"system"`, whole, with base64
-     image data blanked, and where each listed handle occurs. It ends with `END <lines> <last printed> <done|more>`.
-   - A line over 1 MiB is reported by number and length, not printed.
-   - On `more`, it runs again from the line reached, at most 4 runs.
-6. **Decisions use parsed fields only.** A text match only nominates lines, and the decision is made on each line's
-   parsed top-level fields. A message that quotes `"type":"attachment"` inside a tool input is a message (tested).
-7. **Cost.** A PowerShell reader run took 0.94 to 1.36 s per window of a 58.9 MB copy (RAN, this build, from node); the reviewer's
-   similar script took 2.6 to 3.4 s, 1.2 s of it PowerShell starting up. The timeout is 30 s per run. The banner and
-   the debug line print the reader and its elapsed time.
+   - With no boundary in the file, the window is the whole file.
+6. **Cost.** For each window, the bytes read and the time taken (RAN on a copy of a real 58.9 MB transcript, from node,
+   PowerShell 5.1, an idle machine):
+
+   | Window | Bytes from the window's start to the end | Runs | One after another | All in flight together |
+   |---|---|---|---|---|
+   | 0 | 10.3 MiB | 4 | 3.9 s | 1.3 s |
+   | 1 | 8.2 MiB | 3 | 4.8 s | 1.4 s |
+   | 2 | 9.8 MiB | 4 | 4.1 s | 1.2 s |
+   | 3 | 8.9 MiB | 4 | 4.0 s | 1.3 s |
+   | 4 | 7.5 MiB | 3 | 3.1 s | 1.3 s |
+   | 5 | 6.8 MiB | 3 | 3.5 s | 1.4 s |
+   | 6 | 4.6 MiB | 2 | 2.3 s | 1.2 s |
+
+   - Whether the host runs several `$.process.run` calls at once is not measured; if it does not, the time is the
+     sequential column.
+   - The timeout is 30 s per run.
+   - The banner and the debug line print the reader, its runs and its elapsed time.
 
 ## The deliveries, the walk, the sender
 
-- **A delivery is** a `queued_command` attachment, or a `user` record with `isMeta: true`, with text or images.
-- **The walk.** From each delivery, the plugin walks `parentUuid` through every record that is not a user or assistant
-  message: hidden records, and system records such as a Stop hook's summary (54 real deliveries hang off one, the reviewer counted).
-  - It **stops**, counting the delivery, at a message the listing does not hold, and never climbs past one.
-  - A delivery before the boundary whose walk reaches no listed message was the built-in summary's. It is not counted.
+- **A delivery is** a `queued_command` attachment, or a `user` record with `isMeta: true`, with text or images, not on
+  a sidechain. Only its text is carried; image blocks are counted, never carried.
+- **The walk.** From each delivery, the plugin walks `parentUuid` through every parsed record that is not a user or
+  assistant message, whatever its type:
+  - hidden records;
+  - system records such as a Stop hook's summary (54 real deliveries hang off one, the reviewer counted);
+  - `progress`, `file-history-snapshot`, `queue-operation`, and any other type with a `uuid` in the chain.
+- **Where the walk stops:**
+  - at a message the listing does not hold, which it never climbs past: the delivery is counted;
+  - at a parent outside the window or missing: counted;
+  - on a cycle: counted, and the walk never loops;
+  - at the chain's root (the boundary record, or a record with no parent) without meeting a message: the delivery sat
+    at the start of the history and is put back first.
+- **Before the boundary.** A delivery before the boundary whose walk reaches no listed message was the built-in
+  summary's, and is not counted. One beside a **preserved** message is that message's rider, and is treated like any
+  other.
 - **Each delivery's fate:**
   - its neighbour went back **without** its handle (rebuilt or deleted): it is put back right after that message (or,
     when the message was deleted, after the one before it), never between a tool call and its result;
@@ -89,9 +128,11 @@ never recognises anything from an earlier compaction.
 
 Every put-back is a plain user message:
 
-- **A first line the plugin writes:** `[fast-jev-compaction put-back, transcript line N] Delivered by <sender>
-  <while you were working | between turns>; <standing>.` (or the unconfirmed form above), plus "Shortened to ...; the
-  whole text is at that transcript line." when it is shortened, and a count of images not carried.
+- **A first line the plugin writes:** `[fast-jev-compaction put-back, transcript record <uuid>] <Sent|Delivered> by
+  <sender> <while you were working | between turns>; <standing>.` (or the unconfirmed form above), plus "Shortened to
+  ...; the whole text is in that transcript record." when it is shortened, and a count of images not carried.
+- **It names the record's `uuid`**, not a line number. The plugin reads the file backwards from the end and never
+  counts the lines before the window; a uuid is exact, can be searched for, and does not move as the file grows.
 - **The task list** has its own first line: `[fast-jev-compaction put-back, task notices] Background task notifications
   ...`.
 - **Then the carried text**, every line indented two spaces. Every line break counts, `\r` and U+2028/U+2029 included,
@@ -107,7 +148,7 @@ carried whole is decided once, at put-back time, by sender class:
 | A prompt the user typed, confirmed | whole, never counted | |
 | Text the transcript attributes to the user, not confirmed | whole, oldest first, up to a total; past it, its first characters | `unconfirmedBudget` 20,000 (the largest real window held 5,245) |
 | A report from another session or a subagent, or any other origin | whole, newest first, while the budget lasts; past it, a head of the report's **own words** | `putBackBudget` 15,000; `reportHeadChars` 400 |
-| A background task's notification | one line in **one list** per compaction: its transcript line, status and summary | `taskHeadChars` 200 per line; at most 100 lines, the rest named by transcript line |
+| A background task's notification | one line in **one list** per compaction: its transcript record, status and summary | `taskHeadChars` 200 per line; at most 100 lines, the rest named by transcript record |
 | The host's own (hook feedback, a check-in, a notice) | one line: its first line, or, when that is only a label ("Stop hook feedback:"), the label and the line after it | `hostLineChars` 120 |
 
 **How a head finds the sender's own words.**
@@ -121,29 +162,43 @@ carried whole is decided once, at put-back time, by sender class:
 
 **The task list goes after the last message a listed notice sat beside.** Every notice it lists had arrived by then,
 and none is put before its own arrival. A notice loses its place beside its own tool round. What a notice says (a task
-ended, its summary, where its output is) does not depend on that place; its whole text is at its transcript line.
+ended, its summary, where its output is) does not depend on that place; its whole text is in its transcript record.
 
-**Each shortened put-back names its own transcript line** in its first line, where the whole text is. The closing note
-also names shortened deliveries: reports first and newest first, then the rest. It names as many as its cap allows,
-then says "and N more".
+**Each shortened put-back names its own transcript record** in its first line, where the whole text is. The closing
+note also names shortened deliveries, reports first and newest first, then the rest. The note is capped, so it names as
+many as fit and then says "and N more".
+
+**Heads are prefixes.** A head is the first `reportHeadChars` characters of the sender's words, cut at a line break when
+one falls in its second half. It is never cut inside a character outside the Basic Multilingual Plane (a surrogate
+pair) or between `\r` and `\n`.
+
+**Options are checked.** Every character-count option must be a non-negative whole number. Any other value (negative,
+fractional, not finite, not a number) is ignored, the default is kept, and the banner says so.
+
+**A delivery over 1,048,576 characters** of text is not carried. It is named in the note as too large to carry,
+wherever it sits, preserved segments included. It is still walked like any other.
 
 **The defaults come from the real windows** (RAN: a seven-window replay of a 22,109-line copy of a real session, script
 kept outside the repository; each run sees only the file as it stood; stand-in Jev scores every call 0.1; no prompt is
 confirmed, as no `prompt.submit` runs in a replay). The figures are the reduction as returned, then before put-backs,
 then the put-backs' cost as a share of what the compaction saved:
 
-| Window | Ended in | Reduction (as returned / before put-backs) | Put-backs: whole / heads / task list (lines) / one-liners (chars) | Cost |
-|---|---|---|---|---|
-| 0 | plugin | 70% / 74% | 19,417 / 29,288 / 4,528 (54) / 0 | 5% |
-| 1 | built-in | 52% / 57% | 16,213 / 17,650 / 3,698 (43) / 1,519 | 7% |
-| 2 | plugin | 56% / 61% | 15,619 / 31,842 / 4,867 (60) / 2,944 | 8% |
-| 3 | built-in | 36% / 42% | 15,416 / 26,299 / 4,627 (56) / 4,210 | 12% |
-| 4 | plugin | 69% / 72% | 21,683 / 3,143 / 1,774 (15) / 2,105 | 4% |
-| 5 | plugin | 65% / 67% | 12,456 / 6,464 / 2,291 (21) / 1,263 | 3% |
-| 6 | open | 47% / 50% | 13,427 / 5,308 / 1,658 (15) / 421 | 7% |
+| Window | Ended in | Reduction (as returned / before put-backs) | Put-backs: whole / heads / task list (lines) / one-liners (chars) | Cost | Reader in the hook: runs, MiB, time |
+|---|---|---|---|---|---|
+| 0 | plugin | 70% / 74% | 19,762 / 30,918 / 6,374 (54) / 0 | 5% | 4, 10.3, 2.1 s |
+| 1 | built-in | 52% / 57% | 16,417 / 18,622 / 5,164 (43) / 1,663 | 8% | 4, 11.4, 2.0 s |
+| 2 | plugin | 55% / 61% | 15,752 / 33,554 / 6,892 (60) / 3,192 | 8% | 4, 11.4, 1.8 s |
+| 3 | built-in | 36% / 42% | 15,515 / 27,664 / 6,479 (56) / 4,560 | 13% | 4, 11.4, 1.8 s |
+| 4 | plugin | 68% / 72% | 22,211 / 3,318 / 2,273 (15) / 2,280 | 4% | 4, 11.4, 1.5 s |
+| 5 | plugin | 64% / 67% | 12,522 / 6,814 / 2,988 (21) / 1,368 | 4% | 4, 11.4, 1.7 s |
+| 6 | open | 46% / 50% | 13,460 / 5,588 / 2,157 (15) / 456 | 7% | 4, 11.4, 1.7 s |
+
+The reader column was RAN through the hook (the slice script, spawned the way the host would, 4 in flight). A first batch
+asks for 4 slices whether or not 2 would do, which is why most windows read 11.4 MiB; the times include it.
 
 - **The target:** put-backs cost about a tenth of the saving; the defaults meet it in every window that ended in a
-  plugin compaction.
+  plugin compaction. A first line naming a record's uuid is longer than one naming a line number, which costs a
+  point or so.
 - **The built-in windows:** windows 1 and 3 ended in a built-in summary in reality. The figures are what C would have
   cost there; those compactions saved less.
 - **Unbounded:** without the budget, C put back 100,925 to 399,808 characters per window (the reviewer).
@@ -159,12 +214,13 @@ then the put-backs' cost as a share of what the compaction saved:
 
 ## The note
 
-The compacted history of the main conversation ends with one plain note. Nothing recognises or removes it later, so
+The compacted history of the main conversation ends with one plain note, unless nothing was put back, shortened, left
+to the host, counted or stood down. Then there is no note, and the returned history is the library's alone. Nothing recognises or removes it later, so
 each compaction adds one, capped at 24 lines and 4,000 characters. The note gives:
 
 - what was cut;
-- from which transcript line it speaks: **only the window since the last compaction**. It says plainly that anything
-  that arrived before a built-in summary was left to that summary;
+- what it speaks for: **only the window since the last compaction**. What arrived before a built-in summary was left to
+  that summary, except what sat beside a message the summary preserved;
 - how many of the user's prompts and how many other deliveries were put back whole, how many task notices are in the
   list, how many were shortened (named as above), left to the host, or beside messages not listed;
 - any delivery too large to carry;
@@ -179,8 +235,10 @@ session's.
 
 - no transcript file at the derived path;
 - a listed handle not in the file (the handle rule broke, or the file is behind);
-- a line that does not parse, except an unterminated last line, which the host may still be writing and is ignored;
-- reader output with no `END` line (cut), a reader exit other than 0, or a window still unread after 4 runs;
+- a complete line in the window that does not parse, or is not strict UTF-8 (an unterminated last line, which the host
+  may still be writing, is ignored);
+- a slice whose length is not the length asked for (a cut), a reader exit other than 0, or a window still unread after
+  8 runs ("window too large to read");
 - a window whose rebuilt messages include a tool round, but which shows no hidden record at all. Either the format
   changed (a renamed field would otherwise lose everything silently), or there was nothing to put back, in which case
   standing down costs nothing.
@@ -191,8 +249,10 @@ session's.
   checked that the summarizer is shown them). Afterwards they sit before its boundary and are never rescanned.
 - **A subagent's compaction** (`agentId`) reads nothing and gets no note.
 - **A compaction that rebuilds nothing** reads nothing.
-- **Jev's request bodies** are the base's when no plugin-written message is listed. A plugin-written message is left
-  out of the goal by its `[fast-jev-compaction ` prefix: the one prefix the plugin reads, and only for the goal.
+- **Jev's request bodies** are the base's when no plugin-written message is listed.
+- **A plugin-written message never counts toward Jev's goal.** It is left out by its `[fast-jev-compaction ` prefix: the
+  one prefix the plugin reads, and only for the goal. If that leaves no user prompt, the goal is a fixed sentence rather
+  than one built from plugin text.
 
 ## Inferences left, and what a wrong one does
 
@@ -203,8 +263,8 @@ session's.
 | The file is complete when the hook runs | RAN on manual compactions only (2 of 2); auto and precompute unmeasured | a missing handle stands down; a delivery written after the hook started, beside a rebuilt message, is lost unseen |
 | The host keeps a rider exactly when its neighbour keeps its handle | RAN, 318 records, 4 boundaries, 0 exceptions | if the host also keeps what C puts back: a labelled duplicate, **at every later compaction** (C remembers nothing, and the host's copy is a hidden record again next time); if it drops what C leaves: today's loss, unreported |
 | Deliveries have the two shapes | RAN census, 573 of them; 295 other attachments, some shown to the model (`edited_text_file`, `hook_additional_context`, `task_status`), are not carried, as before | a new shape is not put back; a renamed field stands down (above) |
-| A record's own uuid is the one beside its timestamp key, either order (how a listed handle is found, and an oversize line's uuid) | RAN: 11,969 of 11,969 real records, never a second match | a nested object holding a uuid and a timestamp side by side would count: a handle found where it is not would let a delivery beside it be walked to the wrong message (no such record in the real file) |
-| The readers | PowerShell RAN (tests and the seven windows, byte for byte on non-ASCII, paths with a space, `'`, `$`, `;`); sh and awk RAN only under Git for Windows | **not run on macOS or Linux**; a failing reader stands down. Constrained Language mode refuses `ReadLines` (the reviewer): stand down |
+| The transcript's lines are JSON records, one per `\n` | RAN on the real file; READ nowhere | a line that does not parse stands down |
+| The transport scripts | PowerShell RAN (tests: byte-identical slices of files with a BOM, CR-only endings, NUL, invalid UTF-8, a 5 MiB line, a file that grows between reads; the seven windows; path cases); sh RAN only under Git for Windows | **not run on macOS or Linux**; a failing script, or a slice of the wrong length, stands down. Constrained Language mode refuses the .NET file API (the reviewer): stand down |
 | `$.session.cwd()` names the folder the file was created under | INFERRED (one `cwd` in the real transcript) | no file: stand down |
 
 ## If a host process is not acceptable somewhere

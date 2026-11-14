@@ -6,7 +6,7 @@
  * hooks/fast-jev.ts wires both to the host. DESIGN-NOTES.md is the contract.
  */
 import type { PromptOrigin, SessionMessage } from 'claude-code';
-import type { Found, Oversize } from './transcript.js';
+import type { Found } from './transcript.js';
 
 export function fnv1a(text: string): string {
   let hash = 0x811c9dc5;
@@ -169,9 +169,23 @@ export function classOf(kind: string): 'user' | 'report' | 'task' | 'host' {
   return 'report';
 }
 
+/**
+ * The first `n` UTF-16 units of `text`, or fewer: never between the two halves
+ * of a surrogate pair, never between a CR and its LF; nothing for `n <= 0`.
+ */
+export function cutAt(text: string, n: number): string {
+  if (n <= 0) return '';
+  if (text.length <= n) return text;
+  let k = n;
+  const c = text.charCodeAt(k - 1);
+  if (c >= 0xd800 && c <= 0xdbff) k--;
+  if (text[k - 1] === '\r' && text[k] === '\n') k--;
+  return text.slice(0, k);
+}
+
 function firstChars(body: string, n: number): string {
   if (body.length <= n) return body;
-  const cut = body.slice(0, n);
+  const cut = cutAt(body, n);
   const nl = cut.lastIndexOf('\n');
   return nl > n / 2 ? cut.slice(0, nl) : cut;
 }
@@ -213,7 +227,7 @@ export function taskLine(body: string, n: number): string {
   const summary = field(body, 'summary');
   const status = field(body, 'status');
   const line = summary !== undefined ? `${status ?? 'no status'}: ${summary}` : body.replace(/\s+/g, ' ').trim();
-  return line.length <= n ? line : `${line.slice(0, n)}...`;
+  return line.length <= n ? line : `${cutAt(line, n)}...`;
 }
 
 /**
@@ -224,7 +238,7 @@ export function hostLine(body: string, n: number): string {
   const lines = body.split(LINE_BREAK).filter((l) => l.trim().length > 0);
   const first = lines[0] ?? '';
   const line = /^[^:]{1,60}:\s*$/.test(first) && lines[1] !== undefined ? `${first.trim()} ${lines[1].trim()}` : first;
-  return line.length <= n ? line : `${line.slice(0, n)}...`;
+  return line.length <= n ? line : `${cutAt(line, n)}...`;
 }
 
 /**
@@ -234,7 +248,7 @@ export function hostLine(body: string, n: number): string {
  * arrive: whole, oldest first, up to `unconfirmedBudget` in all, then a head.
  * Reports from others: whole, newest first, up to `putBackBudget`, then a head
  * of the report's own words. The host's own messages: one line. A shortened
- * delivery stays whole at its transcript line.
+ * delivery stays whole in its transcript record.
  */
 export function decideCarry(items: readonly { found: Found; confirmed: boolean }[], options: PutBackOptions): Carry[] {
   const carry: Carry[] = items.map(() => ({ mode: 'whole' }));
@@ -242,7 +256,7 @@ export function decideCarry(items: readonly { found: Found; confirmed: boolean }
   let left = options.putBackBudget;
   for (const { item, i } of indexed
     .filter(({ item }) => classOf(item.found.kind) === 'report')
-    .sort((a, b) => b.item.found.line - a.item.found.line)) {
+    .sort((a, b) => b.item.found.order - a.item.found.order)) {
     const body = item.found.body;
     if (body.length <= left) left -= body.length;
     else {
@@ -253,7 +267,7 @@ export function decideCarry(items: readonly { found: Found; confirmed: boolean }
   let unconfirmed = options.unconfirmedBudget;
   for (const { item, i } of indexed
     .filter(({ item }) => classOf(item.found.kind) === 'user' && !item.confirmed)
-    .sort((a, b) => a.item.found.line - b.item.found.line)) {
+    .sort((a, b) => a.item.found.order - b.item.found.order)) {
     const body = item.found.body;
     if (body.length <= unconfirmed) unconfirmed -= body.length;
     else if (body.length > options.reportHeadChars) carry[i] = { mode: 'head', text: firstChars(body, options.reportHeadChars) };
@@ -270,7 +284,7 @@ const FRAME_TAIL = 'Each line below is indented two spaces; one at column zero w
 
 /**
  * The message that puts a delivery back: one first line the plugin writes,
- * naming the transcript line and the sender from the record's origin, saying
+ * naming the transcript record and the sender from the record's origin, saying
  * when it is shortened; then the carried text with every line indented two
  * spaces, so nothing a delivery says can start a line. User-attributed text the
  * plugin did not see arrive leads with that doubt and what follows from it.
@@ -281,7 +295,7 @@ export function putBackText(found: Found, confirmed: boolean, carry: Carry): str
   const short =
     carry.mode === 'whole'
       ? ''
-      : ` Shortened to ${carry.mode === 'line' ? 'one line' : `${text.length} of ${found.body.length} characters`}; the whole text is at that transcript line.`;
+      : ` Shortened to ${carry.mode === 'line' ? 'one line' : `${text.length} of ${found.body.length} characters`}; the whole text is in that transcript record.`;
   const images = found.images > 0 ? ` It carried ${found.images} image(s) or other attachment(s) that are not put back.` : '';
   let head: string;
   if (USER_KINDS.has(found.kind) && !confirmed) {
@@ -290,22 +304,22 @@ export function putBackText(found: Found, confirmed: boolean, carry: Carry): str
     const who = speaker(found.kind, confirmed);
     head = `${who.user ? 'Sent' : 'Delivered'} by ${who.label} ${when}; ${who.standing}.`;
   }
-  return `[fast-jev-compaction put-back, transcript line ${found.line}] ${head}${short}${images} ${FRAME_TAIL}\n${indent(text)}`;
+  return `[fast-jev-compaction put-back, transcript record ${found.uuid}] ${head}${short}${images} ${FRAME_TAIL}\n${indent(text)}`;
 }
 
 export const TASK_LIST_MAX = 100;
 
 /**
  * Every task notification of a compaction as one put-back: one line each,
- * its transcript line, status and summary. Past TASK_LIST_MAX, the rest are
- * named by transcript line only.
+ * its transcript record, status and summary. Past TASK_LIST_MAX, the rest are
+ * named by transcript record only.
  */
 export function taskListText(found: readonly Found[], options: PutBackOptions): string {
-  const sorted = [...found].sort((a, b) => a.line - b.line);
-  const shown = sorted.slice(0, TASK_LIST_MAX).map((f) => `- line ${f.line}, ${taskLine(f.body, options.taskHeadChars)}`);
-  const rest = sorted.slice(TASK_LIST_MAX).map((f) => f.line);
-  if (rest.length > 0) shown.push(`- and ${rest.length} more, at transcript lines ${rest.join(', ')}`);
-  return `[fast-jev-compaction put-back, task notices] Background task notifications delivered while you were working, ${sorted.length} in one list, one line each: transcript line, status, summary; it was not typed by the user. The whole text of each is at its transcript line. ${FRAME_TAIL}\n${indent(shown.join('\n'))}`;
+  const sorted = [...found].sort((a, b) => a.order - b.order);
+  const shown = sorted.slice(0, TASK_LIST_MAX).map((f) => `- record ${f.uuid}, ${taskLine(f.body, options.taskHeadChars)}`);
+  const rest = sorted.slice(TASK_LIST_MAX).map((f) => f.uuid);
+  if (rest.length > 0) shown.push(`- and ${rest.length} more, transcript records ${rest.join(', ')}`);
+  return `[fast-jev-compaction put-back, task notices] Background task notifications delivered while you were working, ${sorted.length} in one list, one line each: transcript record, status, summary; it was not typed by the user. The whole text of each is in its transcript record. ${FRAME_TAIL}\n${indent(shown.join('\n'))}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,9 +334,9 @@ export function taskListText(found: readonly Found[], options: PutBackOptions): 
 export function insertPutBacks(
   out: readonly SessionMessage[],
   sourceOf: readonly number[],
-  placed: readonly { listedIndex: number; line: number; text: string }[],
+  placed: readonly { listedIndex: number; order: number; text: string }[],
 ): SessionMessage[] {
-  const slots = new Map<number, { line: number; text: string }[]>();
+  const slots = new Map<number, { order: number; text: string }[]>();
   for (const p of placed) {
     let slot = -1;
     for (let i = 0; i < sourceOf.length; i++) if (sourceOf[i]! <= p.listedIndex) slot = i;
@@ -330,7 +344,7 @@ export function insertPutBacks(
     slots.set(slot, [...(slots.get(slot) ?? []), p]);
   }
   const at = (slot: number) =>
-    (slots.get(slot) ?? []).sort((a, b) => a.line - b.line).map((p): SessionMessage => ({ role: 'user', text: p.text, toolUses: [] }));
+    (slots.get(slot) ?? []).sort((a, b) => a.order - b.order).map((p): SessionMessage => ({ role: 'user', text: p.text, toolUses: [] }));
   const result: SessionMessage[] = [...at(-1)];
   out.forEach((m, i) => result.push(m, ...at(i)));
   return result;
@@ -346,7 +360,7 @@ const EXCERPT_CHARS = 100;
 /** One bounded line of data, JSON-quoted. */
 function excerpt(words: string): string {
   const flat = words.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return JSON.stringify(flat.length <= EXCERPT_CHARS + 3 ? flat : `${flat.slice(0, EXCERPT_CHARS)}...`);
+  return JSON.stringify(flat.length <= EXCERPT_CHARS + 3 ? flat : `${cutAt(flat, EXCERPT_CHARS)}...`);
 }
 
 /** What a delivery says, for a note line: a task notice's summary; a report under the host's frame; else the text. */
@@ -398,7 +412,7 @@ function capped(head: readonly string[], sections: readonly Section[], tail: rea
     const over = text.length - NOTE_MAX_CHARS + 3;
     text = text.replace(path, `...${path.slice(Math.min(path.length, over))}`);
   }
-  return text.length <= NOTE_MAX_CHARS ? text : `${text.slice(0, NOTE_MAX_CHARS - 3)}...`;
+  return text.length <= NOTE_MAX_CHARS ? text : `${cutAt(text, NOTE_MAX_CHARS - 3)}...`;
 }
 
 export type NoteInput = {
@@ -408,8 +422,8 @@ export type NoteInput = {
   stubbed: number;
   resultsCut: number;
   callsDeleted: number;
-  /** The first transcript line this compaction read; undefined when nothing was read. */
-  since?: number;
+  /** The uuid of the first record this compaction read; undefined when nothing was read. */
+  since?: string;
   /** Why nothing was put back, when the plugin stood down. */
   stoodDown?: string;
   /** Put back whole: the user's own prompts (confirmed), and everything else. */
@@ -420,7 +434,8 @@ export type NoteInput = {
   shortened: readonly { found: Found; confirmed: boolean; carry: Carry }[];
   leftToHost: number;
   unlisted: number;
-  oversize: readonly Oversize[];
+  /** Deliveries too large to carry. */
+  oversize: readonly Found[];
   transcript?: string;
 };
 
@@ -454,26 +469,26 @@ export function noteText(input: NoteInput): string {
       input.unlisted > 0 ? `${input.unlisted} not put back: they sat beside messages this compaction was not given` : '',
     ].filter(Boolean);
     head.push(
-      `What the host stored beside messages since transcript line ${input.since} (prompts sent while you worked, reports, notices, hook feedback): ${parts.join('; ')}. Each put-back opens with a line the plugin wrote naming its transcript line and sender, where the whole text of a shortened one still is; anything that arrived before a built-in summary was left to that summary.`,
+      `What the host stored beside messages since the last compaction (from transcript record ${input.since}): prompts sent while you worked, reports, notices, hook feedback: ${parts.join('; ')}. Each put-back opens with a line the plugin wrote naming its transcript record and sender, where the whole text of a shortened one still is; what arrived before a built-in summary was left to that summary, except what sat beside a message it preserved.`,
     );
   }
   const sections: Section[] = [
     {
-      title: 'Shortened, reports first and newest first; the whole text is at the transcript line given:',
+      title: 'Shortened, reports first and newest first; the whole text is in the transcript record given:',
       items: [...input.shortened]
         .sort((a, b) => {
           const ra = classOf(a.found.kind) === 'report' ? 0 : 1;
           const rb = classOf(b.found.kind) === 'report' ? 0 : 1;
-          return ra !== rb ? ra - rb : ra === 0 ? b.found.line - a.found.line : a.found.line - b.found.line;
+          return ra !== rb ? ra - rb : ra === 0 ? b.found.order - a.found.order : a.found.order - b.found.order;
         })
         .map(
           (s) =>
-            `- line ${s.found.line} from ${speaker(s.found.kind, s.confirmed).label}: ${excerpt(classOf(s.found.kind) === 'report' ? reportText(s.found.body) : gist(s.found.body))} (${s.found.body.length} characters)`,
+            `- record ${s.found.uuid} from ${speaker(s.found.kind, s.confirmed).label}: ${excerpt(classOf(s.found.kind) === 'report' ? reportText(s.found.body) : gist(s.found.body))} (${s.found.body.length} characters)`,
         ),
     },
     {
       title: 'Too large to carry, not put back:',
-      items: input.oversize.filter((x) => x.delivery).map((x) => `- line ${x.line}: ${x.length} characters`),
+      items: input.oversize.map((x) => `- record ${x.uuid} from ${speaker(x.kind).label}: ${x.body.length} characters`),
     },
   ];
   const path = input.transcript?.split(LINE_BREAK).join(' ');

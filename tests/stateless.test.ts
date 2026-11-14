@@ -2,7 +2,6 @@
 // back what the host stored beside messages it no longer gets back whole.
 import { describe, expect, it } from 'vitest';
 import { NOTE_MAX_CHARS } from '../hooks/deliveries.ts';
-import { scanTranscript } from '../hooks/transcript.ts';
 import {
   bookkeeping,
   boundary,
@@ -21,6 +20,7 @@ import {
   result,
   stopHookSummary,
   transcript,
+  transport,
   uuid,
   type Item,
   type SessionMessage,
@@ -43,7 +43,7 @@ describe('putting back what the host stored beside a rebuilt message', () => {
     const at = out.findIndex((m) => PUT_BACK.test(m.text));
     expect(out[at - 1]!.toolResults?.[0]?.tool_use_id).toBe('t2');
     expect(out[at]!.text.split('\n').slice(1)).toEqual([`  ${TYPED}`]);
-    expect(out[at]!.text.split('\n')[0]).toMatch(/^\[fast-jev-compaction put-back, transcript line 8\] Attributed to the user by the transcript, while you were working;/);
+    expect(out[at]!.text.split('\n')[0]).toMatch(/^\[fast-jev-compaction put-back, transcript record [0-9a-f-]{36}\] Attributed to the user by the transcript, while you were working;/);
   });
 
   it('C2: puts back a report that arrived after the turn ended, past the Stop hook record, after its message', async () => {
@@ -151,7 +151,7 @@ describe('putting back what the host stored beside a rebuilt message', () => {
     expect(t.toasts.at(-1)).not.toContain('stood down');
     expect(holding(out, 'AFTER THE SUMMARY')).toHaveLength(1);
     expect(holding(out, 'BEFORE THE SUMMARY')).toHaveLength(0);
-    expect(out.at(-1)!.text).toContain('anything that arrived before a built-in summary was left to that summary');
+    expect(out.at(-1)!.text).toContain('what arrived before a built-in summary was left to that summary');
     expect(out.at(-1)!.text).not.toContain('not put back: they sat beside');
   });
 });
@@ -216,7 +216,7 @@ describe('the budget: what is carried whole', () => {
     const by = (tag: string) => putBacks(out).find((m) => m.text.includes(tag))!.text;
     expect(by('USER-LONG').length).toBeGreaterThan(50_000);
     expect(by('NEWEST-REPORT').length).toBeGreaterThan(15_000);
-    expect(by('MIDDLE-REPORT')).toMatch(/Shortened to \d+ of 15014 characters; the whole text is at that transcript line\./);
+    expect(by('MIDDLE-REPORT')).toMatch(/Shortened to \d+ of 15014 characters; the whole text is in that transcript record\./);
     expect(by('OLDEST-REPORT')).toContain('Shortened to');
     const notice = putBacks(out).find((m) => m.text.includes('Gates green'))!.text;
     expect(notice).toContain('completed: Gates green');
@@ -227,7 +227,7 @@ describe('the budget: what is carried whole', () => {
     expect(hook).not.toContain('second line');
     const note = out.at(-1)!.text;
     expect(note).toMatch(NOTE);
-    expect(note).toMatch(/- line \d+ from another Claude session: "MIDDLE-REPORT r+\.\.\." \(15014 characters\)/);
+    expect(note).toMatch(/- record [0-9a-f-]{36} from another Claude session: "MIDDLE-REPORT r+\.\.\." \(15014 characters\)/);
     expect(note.length).toBeLessThanOrEqual(NOTE_MAX_CHARS);
     expect(t.toasts.at(-1)).toMatch(/put-backs \d+ chars, \d+% of the saving; transcript read by fs in \d+ ms/);
   });
@@ -253,7 +253,7 @@ describe('standing down, reported, never a guess', () => {
         lines.splice(3, 0, '{"type":"attachment", broken');
         return lines.join('\n');
       },
-      /the transcript could not be read \(transcript line 4 does not parse\)/,
+      /the transcript could not be read \(a transcript line in the window is not JSON\)/,
     ],
     ['D6: no hidden record at all in a window with a rebuilt tool round', (h) => transcript(h).text, /shows no hidden record since the last compaction/],
   ];
@@ -278,8 +278,8 @@ describe('standing down, reported, never a guess', () => {
   });
 });
 
-describe('D3: the output limit', () => {
-  it('blanks base64 image data and notes the image, keeping the text', async () => {
+describe('reading through the byte transport', () => {
+  it('carries no image data, and notes the image, keeping the text', async () => {
     const h = history();
     const t = harness();
     const prompt = [{ type: 'text', text: 'LOOK AT THIS' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(200_000) } }];
@@ -290,57 +290,61 @@ describe('D3: the output limit', () => {
     expect(out.some((m) => m.text.includes('AAAAAAAA'))).toBe(false);
   });
 
-  it('names a delivery over the line cap as too large to carry, and still puts back the others', async () => {
+  it('names a delivery over 1,048,576 characters as too large to carry, and still puts back the others', async () => {
     const h = history();
     const t = harness();
     t.file(transcript(withHidden(h, { 6: [queued(`HUGE ${'z'.repeat(1_100_000)}`, 'peer'), queued('SMALL', 'peer')] })).text);
     const out = await t.compact(h);
     expect(holding(out, 'SMALL')).toHaveLength(1);
     expect(out.some((m) => m.text.includes('zzzzzzzz'))).toBe(false);
-    expect(out.at(-1)!.text).toMatch(/Too large to carry, not put back:\n- line 8: \d{7} characters/);
+    expect(out.at(-1)!.text).toMatch(/Too large to carry, not put back:\n- record [0-9a-f-]{36} from another Claude session: 1100005 characters/);
   });
 
-  it('runs the reader again from the line reached when the window is larger than one run returns', async () => {
+  it('reads a file over 4 MiB in slices from the end, several in flight, until the boundary is parsed', async () => {
     const h = history();
-    const hidden = Array.from({ length: 30 }, (_, i) => queued(`REPORT-${i} ${'p'.repeat(200)}`, 'peer'));
-    const file = transcript(withHidden(h, { 6: hidden })).text;
-    const t = harness({ putBackBudget: 1e9, minReductionRatio: -1e9 }, {
-      windows: true,
-      run: async (_argv, init) => ({
-        exitCode: 0,
-        stdout: scanTranscript(file, (init?.stdin ?? '').split('\n'), { from: Number(init?.env?.['FJC_FROM'] ?? 0), budget: 5_000, lineCap: 1_048_576 }),
-        stderr: '',
-      }),
-    });
-    t.file(file, 5 * 1024 * 1024);
+    const old = transcript([message('user', 'before'), message('assistant', `${'o'.repeat(4_000_000)}`)]);
+    const reports = Array.from({ length: 30 }, (_, i) => queued(`REPORT-${i} ${'p'.repeat(100_000)}`, 'peer'));
+    const file = transcript([boundary(), ...withHidden(h, { 6: reports })], { lines: old.text.trimEnd().split('\n') }).text;
+    const t = harness({ putBackBudget: 1e9, minReductionRatio: -1e9 }, { windows: true, run: transport(file) });
+    t.file(file, Buffer.byteLength(file));
     const out = await t.compact(h);
     expect(t.runs.length).toBeGreaterThan(1);
-    expect(t.runs[0]!.argv.slice(0, 4)).toEqual(['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
-    expect(t.runs[0]!.env).toMatchObject({ FJC_PATH: PATH, FJC_FROM: '0' });
-    expect(t.runs[1]!.env!['FJC_FROM']).not.toBe('0');
+    expect(t.runs[0]!.argv.slice(1, 4)).toEqual(['-NoProfile', '-NonInteractive', '-EncodedCommand']);
+    expect(Number(t.runs[0]!.env!['FJC_OFFSET']) + Number(t.runs[0]!.env!['FJC_LENGTH'])).toBe(Buffer.byteLength(file));
     expect(putBacks(out)).toHaveLength(30);
+    expect(t.toasts.at(-1)).toMatch(/transcript read by powershell in \d+ ms \(\d run\(s\), [\d.]+ MiB\)/);
   });
 
-  it('D2: the path reaches the reader as data, and the script never contains it', async () => {
+  it('D2: the path, offset and length reach the script as data; the script never contains them', async () => {
     const h = history();
-    const file = transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text;
-    const t = harness({}, { run: async () => ({ exitCode: 0, stdout: scanTranscript(file, h.map((m) => m.handle!), { budget: 1e9, lineCap: 1e9 }), stderr: '' }) });
-    t.file(file, 5 * 1024 * 1024);
+    const file = transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text + `{"pad":"${'x'.repeat(4_200_000)}"}\n`;
+    const t = harness({}, { run: transport(file) });
+    t.file(file, Buffer.byteLength(file));
     await t.compact(h);
     expect(t.runs[0]!.argv.slice(0, 2)).toEqual(['sh', '-c']);
     expect(t.runs[0]!.argv.join(' ')).not.toContain(PATH);
-    expect(t.runs[0]!.env!['FJC_PATH']).toBe(PATH);
-    expect(t.runs[0]!.stdin!.split('\n')).toEqual(h.map((m) => m.handle));
+    expect(t.runs[0]!.env).toMatchObject({ FJC_PATH: PATH });
+    expect(t.runs[0]!.stdin).toBeUndefined();
   });
 
-  it('stands down on a reader output that was cut (no END line)', async () => {
+  it('stands down on a slice that comes back shorter than asked (a cut output)', async () => {
     const h = history();
-    const file = transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text;
-    const full = scanTranscript(file, h.map((m) => m.handle!), { budget: 1e9, lineCap: 1e9 });
-    const t = harness({}, { run: async () => ({ exitCode: 0, stdout: full.slice(0, full.lastIndexOf('END')), stderr: '' }) });
-    t.file(file, 5 * 1024 * 1024);
+    const file = transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text + `{"pad":"${'x'.repeat(4_200_000)}"}\n`;
+    const t = harness({}, { run: transport(file, { cut: 1_000_000 }) });
+    t.file(file, Buffer.byteLength(file));
     const out = await t.compact(h);
-    expect(out.at(-1)!.text).toContain('the reader output is incomplete');
+    expect(putBacks(out)).toHaveLength(0);
+    expect(out.at(-1)!.text).toMatch(/the reader returned \d+ of \d+ bytes/);
+  });
+
+  it('stands down when the window needs more runs than the ceiling', async () => {
+    const h = history();
+    const pad = Array.from({ length: 30 }, () => bookkeeping());
+    const big = transcript([...withHidden(h, { 6: [queued('Q', 'peer')] }), ...pad.map((p) => ({ ...p, attachment: { type: 'file', content: 'f'.repeat(1_000_000) } }))]).text;
+    const t = harness({}, { run: transport(big) });
+    t.file(big, Buffer.byteLength(big));
+    const out = await t.compact(h);
+    expect(out.at(-1)!.text).toContain('window too large to read');
   });
 });
 

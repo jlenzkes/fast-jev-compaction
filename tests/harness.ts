@@ -224,8 +224,24 @@ export function harness(options: Record<string, unknown> = {}, host: { run?: Run
   };
 }
 
-export const PUT_BACK = /^\[fast-jev-compaction put-back, (?:transcript line (\d+)|task notices)\] /;
+export const PUT_BACK = /^\[fast-jev-compaction put-back, (?:transcript record ([0-9a-f-]{36}|u\d+)|task notices)\] /;
 export const NOTE = /^\[fast-jev-compaction note\] /;
+
+/**
+ * The byte transport, faked over `text`: each run answers the file's size and
+ * exactly the slice FJC_OFFSET/FJC_LENGTH asks for, in base64, as the scripts
+ * do. `cut` cuts every answer to that many characters.
+ */
+export function transport(text: string, options: { cut?: number } = {}): Run {
+  const bytes = new TextEncoder().encode(text);
+  return async (_argv, init) => {
+    const offset = Number(init?.env?.['FJC_OFFSET']);
+    const length = Number(init?.env?.['FJC_LENGTH']);
+    let stdout = `${bytes.length}\n${Buffer.from(bytes.subarray(offset, offset + length)).toString('base64')}\n`;
+    if (options.cut !== undefined) stdout = stdout.slice(0, options.cut);
+    return { exitCode: 0, stdout, stderr: '' };
+  };
+}
 
 /** The put-backs in a history. */
 export function putBacks(messages: readonly SessionMessage[]): SessionMessage[] {

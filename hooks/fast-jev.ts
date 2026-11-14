@@ -26,7 +26,7 @@ import {
   USER_KINDS,
   withoutPluginMessages,
 } from './deliveries.js';
-import { type Found, neighbourOf, type Oversize, readWindow, type Window } from './transcript.js';
+import { DELIVERY_MAX_CHARS, type Found, neighbourOf, readWindow, type Window } from './transcript.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
@@ -58,6 +58,18 @@ export type HookFetchResponse = {
 /** The shape of `$.http.fetch`, so the hook can be driven without an engine. */
 export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetchResponse>;
 
+/**
+ * A character count from the options: a non-negative whole number, or the
+ * default with a line saying so in `ignored`.
+ */
+function optionCount(options: PluginOptions, key: string, fallback: number, ignored: string[]): number {
+  const value = options[key];
+  if (value === undefined) return fallback;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  ignored.push(`${key} ${String(value).slice(0, 20)} is not a whole number of characters; ${fallback} kept`);
+  return fallback;
+}
+
 export type HookConfig = CompactOptions & {
   apiKey?: string;
   compactAtPercent: number;
@@ -65,6 +77,8 @@ export type HookConfig = CompactOptions & {
   model: string;
   /** End the compacted history with a note of what was cut and put back. */
   note: boolean;
+  /** Options that were ignored, each with the default kept: the banner says so. */
+  ignoredOptions: string[];
 } & PutBackOptions;
 
 /**
@@ -105,6 +119,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   // This fork: stub dropped calls unless an option says otherwise,
   // so a session never reads its own reports with no call behind them (#65).
   numbers.dropCalls = typeof options['dropCalls'] === 'boolean' ? options['dropCalls'] : false;
+  const ignoredOptions: string[] = [];
   const config: HookConfig = {
     ...numbers,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
@@ -115,11 +130,12 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
     note: typeof options['note'] === 'boolean' ? options['note'] : true,
-    putBackBudget: optionNumber(options, 'putBackBudget', PUT_BACK_DEFAULTS.putBackBudget),
-    reportHeadChars: optionNumber(options, 'reportHeadChars', PUT_BACK_DEFAULTS.reportHeadChars),
-    taskHeadChars: optionNumber(options, 'taskHeadChars', PUT_BACK_DEFAULTS.taskHeadChars),
-    hostLineChars: optionNumber(options, 'hostLineChars', PUT_BACK_DEFAULTS.hostLineChars),
-    unconfirmedBudget: optionNumber(options, 'unconfirmedBudget', PUT_BACK_DEFAULTS.unconfirmedBudget),
+    putBackBudget: optionCount(options, 'putBackBudget', PUT_BACK_DEFAULTS.putBackBudget, ignoredOptions),
+    reportHeadChars: optionCount(options, 'reportHeadChars', PUT_BACK_DEFAULTS.reportHeadChars, ignoredOptions),
+    taskHeadChars: optionCount(options, 'taskHeadChars', PUT_BACK_DEFAULTS.taskHeadChars, ignoredOptions),
+    hostLineChars: optionCount(options, 'hostLineChars', PUT_BACK_DEFAULTS.hostLineChars, ignoredOptions),
+    unconfirmedBudget: optionCount(options, 'unconfirmedBudget', PUT_BACK_DEFAULTS.unconfirmedBudget, ignoredOptions),
+    ignoredOptions,
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -202,7 +218,42 @@ export function toSessionMessages(
 export type SessionCompaction = {
   result: CompactResult;
   messages: SessionMessage[];
+  /** For each returned message, the index of the listed message it came from. */
+  sources: number[];
 };
+
+/**
+ * For each message the library returned, the index of the listed message it
+ * came from, from the library's own evidence: an untouched message is the
+ * same object; a rebuilt one keeps tool ids that belong to one listed message
+ * only; a rebuilt one with no tool left (its calls dropped, its text kept) is
+ * the next listed message after the previous source that had tool calls and
+ * the same role and text. Never a guess by text alone.
+ */
+export function sourcesOf(listed: readonly Message[], out: readonly Message[]): number[] {
+  const index = new Map<Message, number>();
+  const byTool = new Map<string, number>();
+  listed.forEach((m, i) => {
+    index.set(m, i);
+    for (const t of m.toolUses) byTool.set(t.tool_use_id, i);
+    for (const r of m.toolResults ?? []) byTool.set(r.tool_use_id, i);
+  });
+  let prev = -1;
+  return out.map((m) => {
+    let at = index.get(m);
+    if (at === undefined) {
+      const id = m.toolUses[0]?.tool_use_id ?? m.toolResults?.[0]?.tool_use_id;
+      if (id !== undefined) at = byTool.get(id);
+    }
+    if (at === undefined) {
+      at = prev + 1;
+      const touched = (l: Message) => l.toolUses.length > 0 || (l.toolResults?.length ?? 0) > 0;
+      while (at < listed.length && !(listed[at]!.role === m.role && listed[at]!.text === m.text && touched(listed[at]!))) at++;
+    }
+    prev = Math.min(at, listed.length - 1);
+    return prev;
+  });
+}
 
 /** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
 export async function compactSession(
@@ -212,7 +263,7 @@ export async function compactSession(
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
   const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
-  return { result, messages: toSessionMessages(messages, result.messages) };
+  return { result, messages: toSessionMessages(messages, result.messages), sources: sourcesOf(messages, result.messages) };
 }
 
 function percent(ratio: number): string {
@@ -342,29 +393,10 @@ function notify(
 }
 
 /**
- * For each message the library handed back, the index of the listed message
- * it came from: the same object, or one rebuilt from it (same role and text,
- * its tool ids a subset). Messages the library deleted have no entry.
- */
-export function sourceIndices(listed: readonly SessionMessage[], out: readonly SessionMessage[]): number[] {
-  const ids = (m: SessionMessage) => [...m.toolUses.map((t) => t.tool_use_id), ...(m.toolResults ?? []).map((r) => r.tool_use_id)];
-  const from = (l: SessionMessage, o: SessionMessage) =>
-    l === o || (l.role === o.role && l.text === o.text && ids(o).every((id) => ids(l).includes(id)));
-  const sources: number[] = [];
-  let p = 0;
-  for (const o of out) {
-    while (p < listed.length && !from(listed[p]!, o)) p++;
-    sources.push(Math.min(p, listed.length - 1));
-    p++;
-  }
-  return sources;
-}
-
-/**
  * A maintainer's aid, off unless the environment variable FAST_JEV_DEBUG_LOG
  * names a file: each `session.compact` dispatch appends one JSON line of
  * values the plugin computed (lengths, 32-bit hashes, tool ids, roles, counts,
- * transcript line numbers, its own fixed strings), never text from a message.
+ * record uuids, its own fixed strings), never text from a message.
  * The file is cut back to its newest half past 1 MiB.
  */
 const DEBUG_LOG_MAX_CHARS = 1024 * 1024;
@@ -414,7 +446,7 @@ function chars(messages: readonly SessionMessage[]): number {
 }
 
 export type PutBackReport = {
-  placed: { listedIndex: number; line: number; text: string }[];
+  placed: { listedIndex: number; order: number; text: string }[];
   /** Put back whole: the user's confirmed prompts, and everything else. */
   wholeUser: number;
   whole: number;
@@ -423,10 +455,13 @@ export type PutBackReport = {
   shortened: { found: Found; confirmed: boolean; carry: Carry }[];
   leftToHost: number;
   unlisted: number;
-  oversize: Oversize[];
-  since?: number;
+  /** Deliveries too large to carry: named, not put back. */
+  oversize: Found[];
+  since?: string;
   stoodDown?: string;
   readerMs?: number;
+  runs?: number;
+  bytesRead?: number;
   via?: string;
 };
 
@@ -463,7 +498,7 @@ export async function planPutBacks(
   const index = new Map(handles.map((h) => [h, listed.findIndex((m) => m.handle === h)] as const));
   const handleSet = new Set(handles);
   const confirmed = new Map<string, boolean>();
-  for (const d of [...w.deliveries].sort((x, y) => x.line - y.line)) {
+  for (const d of [...w.deliveries].sort((x, y) => x.order - y.order)) {
     if (USER_KINDS.has(d.kind)) confirmed.set(d.uuid, confirmations.confirm(d.uuid, await sha256(d.body)));
   }
   const acted: { found: Found; confirmed: boolean; listedIndex: number }[] = [];
@@ -475,16 +510,22 @@ export async function planPutBacks(
       report.unlisted++;
       continue;
     }
-    if (!rebuilt.has(nb.at)) {
+    // At the chain's root with no message met: it sat at the start of the history.
+    const listedIndex = 'first' in nb ? -1 : index.get(nb.at)!;
+    if ('at' in nb && !rebuilt.has(nb.at)) {
       report.leftToHost++;
       continue;
     }
-    if (classOf(d.kind) === 'task') tasks.push({ found: d, listedIndex: index.get(nb.at)! });
-    else acted.push({ found: d, confirmed: confirmed.get(d.uuid) === true, listedIndex: index.get(nb.at)! });
+    if (d.body.length > DELIVERY_MAX_CHARS) {
+      report.oversize.push(d);
+      continue;
+    }
+    if (classOf(d.kind) === 'task') tasks.push({ found: d, listedIndex });
+    else acted.push({ found: d, confirmed: confirmed.get(d.uuid) === true, listedIndex });
   }
   const carry = decideCarry(acted, options);
   acted.forEach((a, i) => {
-    report.placed.push({ listedIndex: a.listedIndex, line: a.found.line, text: putBackText(a.found, a.confirmed, carry[i]!) });
+    report.placed.push({ listedIndex: a.listedIndex, order: a.found.order, text: putBackText(a.found, a.confirmed, carry[i]!) });
     if (carry[i]!.mode !== 'whole') report.shortened.push({ found: a.found, confirmed: a.confirmed, carry: carry[i]! });
     else if (classOf(a.found.kind) === 'user' && a.confirmed) report.wholeUser++;
     else report.whole++;
@@ -492,12 +533,11 @@ export async function planPutBacks(
   if (tasks.length > 0) {
     // One list, after the last message a notice sat beside: every notice it
     // lists had arrived by then, and none is put before its own arrival.
-    const last = tasks.reduce((x, y) => (y.listedIndex > x.listedIndex || (y.listedIndex === x.listedIndex && y.found.line > x.found.line) ? y : x));
-    report.placed.push({ listedIndex: last.listedIndex, line: last.found.line, text: taskListText(tasks.map((t) => t.found), options) });
+    const last = tasks.reduce((x, y) => (y.listedIndex > x.listedIndex || (y.listedIndex === x.listedIndex && y.found.order > x.found.order) ? y : x));
+    report.placed.push({ listedIndex: last.listedIndex, order: last.found.order, text: taskListText(tasks.map((t) => t.found), options) });
     report.tasks = tasks.length;
   }
-  report.oversize = w.oversize.filter((x) => x.delivery && x.line > w.boundary);
-  report.since = w.start;
+  if (w.startUuid !== undefined) report.since = w.startUuid;
   return report;
 }
 
@@ -528,8 +568,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const listed = event.messages;
-      const goal = config.goal ?? goalFromMessages(withoutPluginMessages(listed) as unknown as Message[]);
-      const { result, messages } = await compactSession(listed, { ...config, goal }, async (url, init) => {
+      // Jev's goal never includes a message the plugin wrote; with no user prompt
+      // left, it is a fixed sentence. With no plugin message listed, it is the
+      // library's own, as at the base.
+      const own = withoutPluginMessages(listed);
+      const goal = config.goal ?? (own.length === listed.length ? undefined : goalFromMessages(own as unknown as Message[]) || 'Continue the work in this conversation.');
+      const { result, messages, sources } = await compactSession(listed, { ...config, goal }, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
@@ -566,16 +610,21 @@ export const register: Register = (on: On, options: PluginOptions) => {
               listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string'),
               () => Date.now(),
             );
-            report = { ...(await planPutBacks(listed, rebuilt, read.window, confirmations, config)), readerMs: read.ms, via: read.via };
+            report = { ...(await planPutBacks(listed, rebuilt, read.window, confirmations, config)), readerMs: read.ms, via: read.via, runs: read.runs, bytesRead: read.bytes };
           } catch (error) {
             report.stoodDown = `the transcript could not be read (${error instanceof Error ? error.message : String(error)})`;
           }
         }
       }
-      let out = insertPutBacks(messages, sourceIndices(listed, messages), report.placed);
+      let out = insertPutBacks(messages, sources, report.placed);
       const putBackChars = chars(out) - chars(messages);
       // A subagent's compaction gets no note: the transcript it would name is the main session's.
-      if (config.note && event.agentId === undefined) {
+      // A subagent's compaction gets no note: the transcript it would name is the
+      // main session's. Nor does one with nothing to say about what sat beside a
+      // message: the returned history is then the library's alone.
+      const something =
+        report.placed.length > 0 || report.leftToHost > 0 || report.unlisted > 0 || report.oversize.length > 0 || report.stoodDown !== undefined;
+      if (config.note && event.agentId === undefined && something) {
         out = [
           ...out,
           {
@@ -615,15 +664,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
         report.stoodDown ? `put-backs stood down: ${report.stoodDown}` : '',
       ].filter(Boolean);
       const cost = report.placed.length > 0 && saved > 0 ? `; put-backs ${putBackChars} chars, ${percent(putBackChars / saved)} of the saving` : '';
-      const reader = report.readerMs !== undefined ? `; transcript read by ${report.via} in ${report.readerMs} ms` : '';
+      const reader =
+        report.readerMs !== undefined
+          ? `; transcript read by ${report.via} in ${report.readerMs} ms${report.runs ? ` (${report.runs} run(s), ${(report.bytesRead! / 1048576).toFixed(1)} MiB)` : ''}`
+          : '';
+      const ignored = config.ignoredOptions.length > 0 ? `; options ignored: ${config.ignoredOptions.join('; ')}` : '';
       await debugLog($, {
         ev: 'session.compact',
         trigger: event.trigger,
         agentId: event.agentId ?? null,
         listed: listSummary(listed),
         rebuilt: rebuilt.size,
-        placed: report.placed.map((p) => p.line),
-        shortened: report.shortened.map((s) => s.found.line),
+        placed: report.placed.length,
+        shortened: report.shortened.map((s) => s.found.uuid),
         tasks: report.tasks,
         leftToHost: report.leftToHost,
         unlisted: report.unlisted,
@@ -643,7 +696,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         $,
         `kept ${messages.length}/${listed.length} listed messages (${parts.join('; ')}), no summary (${percent(ratio)} smaller as returned${
           report.placed.length > 0 ? `, ${percent(saved / before)} before put-backs` : ''
-        }${cost}${reader}; ${summarize(result)})`,
+        }${cost}${reader}${ignored}; ${summarize(result)})`,
       );
       return { messages: out };
     } catch (error) {

@@ -3,7 +3,7 @@
 // reader's executable and the top-level uuid rule. Records are shaped as the
 // host writes them; the body text is this file's own.
 import { describe, expect, it } from 'vitest';
-import { scanTranscript } from '../hooks/transcript.ts';
+import { parseLines, windowOf } from '../hooks/transcript.ts';
 import {
   call,
   harness,
@@ -20,6 +20,7 @@ import {
   REAL_TASK,
   result,
   transcript,
+  transport,
   uuid,
   type Item,
   type SessionMessage,
@@ -53,7 +54,7 @@ describe('finding 2: task notices as one list', () => {
     const lists = putBacks(out).filter((m) => m.text.startsWith('[fast-jev-compaction put-back, task notices]'));
     expect(putBacks(out)).toHaveLength(1);
     expect(lists).toHaveLength(1);
-    expect(lists[0]!.text.split('\n').slice(1)).toEqual([expect.stringMatching(/^ {2}- line \d+, completed: first job done$/), expect.stringMatching(/^ {2}- line \d+, completed: second job done$/)]);
+    expect(lists[0]!.text.split('\n').slice(1)).toEqual([expect.stringMatching(/^ {2}- record [0-9a-f-]{36}, completed: first job done$/), expect.stringMatching(/^ {2}- record [0-9a-f-]{36}, completed: second job done$/)]);
     const at = out.indexOf(lists[0]!);
     expect(out[at - 1]!.toolResults?.[0]?.tool_use_id).toBe('b');
     expect(t.toasts.at(-1)).toContain('2 task notice(s) in one list');
@@ -113,7 +114,7 @@ describe('finding 6: unconfirmed user-attributed text is whole only up to its ow
     const out = await t.compact(h);
     expect(t.fallbacks).toHaveLength(0);
     const pb = putBacks(out)[0]!.text;
-    expect(pb).toMatch(/Shortened to \d+ of 1000007 characters; the whole text is at that transcript line\./);
+    expect(pb).toMatch(/Shortened to \d+ of 1000007 characters; the whole text is in that transcript record\./);
     expect(pb.length).toBeLessThan(1_000);
   });
 
@@ -141,14 +142,13 @@ describe('finding 8: a subagent\'s compaction ends with no note', () => {
 });
 
 describe('finding 9: the reader\'s executable, and a handle found only as a record\'s own uuid', () => {
-  const big = (h: SessionMessage[]) => transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text;
-  const run = (file: string, h: SessionMessage[]) => async () => ({ exitCode: 0, stdout: scanTranscript(file, h.map((m) => m.handle!), { budget: 1e9, lineCap: 1e9 }), stderr: '' });
+  const big = (h: SessionMessage[]) => `${transcript(withHidden(h, { 6: [queued('Q', 'peer')] })).text}{"pad":"${'x'.repeat(4_200_000)}"}\n`;
   const FULL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
   it('starts Windows PowerShell by its full path when that file exists', async () => {
     const h = history();
-    const t = harness({}, { windows: true, run: run(big(h), h) });
-    t.file(big(h), 5 * 1024 * 1024);
+    const t = harness({}, { windows: true, run: transport(big(h)) });
+    t.file(big(h));
     t.touch(FULL);
     await t.compact(h);
     expect(t.runs[0]!.argv[0]).toBe(FULL);
@@ -156,8 +156,8 @@ describe('finding 9: the reader\'s executable, and a handle found only as a reco
 
   it('falls back to the bare name only when that file is absent', async () => {
     const h = history();
-    const t = harness({}, { windows: true, run: run(big(h), h) });
-    t.file(big(h), 5 * 1024 * 1024);
+    const t = harness({}, { windows: true, run: transport(big(h)) });
+    t.file(big(h));
     await t.compact(h);
     expect(t.runs[0]!.argv[0]).toBe('powershell');
   });
@@ -172,12 +172,13 @@ describe('finding 9: the reader\'s executable, and a handle found only as a reco
     expect(out.at(-1)!.text).toContain('1 listed message(s) are not in the transcript file');
   });
 
-  it('finds an oversize line\'s own uuid when its keys come in another order', () => {
+  it('takes a record\'s own uuid from its parsed top level, whatever its key order', () => {
     const h = history();
     const own = uuid();
-    const odd = JSON.stringify({ parentUuid: h[6]!.handle, isSidechain: false, type: 'attachment', timestamp: 'T', uuid: own, attachment: { type: 'queued_command', prompt: 'x'.repeat(2000), origin: { kind: 'peer' } } });
-    const rows = scanTranscript(`${transcript(h).text}${odd}\n`, h.map((m) => m.handle!), { budget: 1e9, lineCap: 1000 });
-    expect(rows).toMatch(new RegExp(`\\nX\\t\\d+\\t\\d+\\t${own}\\t${h[6]!.handle}\\tdelivery\\n`));
+    const odd = JSON.stringify({ parentUuid: h[6]!.handle, isSidechain: false, type: 'attachment', timestamp: 'T', extra: { uuid: 'nested' }, uuid: own, attachment: { type: 'queued_command', prompt: 'x'.repeat(2_000_000), origin: { kind: 'peer' } } });
+    const bytes = new TextEncoder().encode(`${transcript(h).text}${odd}\n`);
+    const w = windowOf(parseLines(bytes, 0, bytes.length, 0, 0, false), new Set(h.map((m) => m.handle!)));
+    expect(w.deliveries.map((d) => [d.uuid, d.parent])).toEqual([[own, h[6]!.handle]]);
   });
 });
 
