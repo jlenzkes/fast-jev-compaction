@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
@@ -40,11 +40,35 @@
       "description": "When Jev rates a call as no longer needed, remove the call and its result. Off: keep the call as a stub, its tool name with input and result cut to a head, so the history still shows a tool call before every report; a call an earlier compaction already stubbed is removed.",
       "default": false
     },
-    "receipt": {
+    "note": {
       "type": "boolean",
-      "title": "Receipt after compaction",
-      "description": "End the compacted history with a short message saying what was cut, which delivered prompts were put back, what could not be carried, and where the full transcript is.",
+      "title": "Note after compaction",
+      "description": "End the compacted history with a short note: what was cut, what the host had stored beside messages and how it was put back (whole or shortened, with transcript lines), and where the full transcript is.",
       "default": true
+    },
+    "putBackBudget": {
+      "type": "number",
+      "title": "Put-back budget (characters)",
+      "description": "Characters of reports from other sessions carried whole per compaction, newest first; the rest are put back as a head. Prompts the user typed are always whole and not counted.",
+      "default": 15000
+    },
+    "reportHeadChars": {
+      "type": "number",
+      "title": "Report head (characters)",
+      "description": "How much of a report past the budget is put back; the whole text stays at its transcript line.",
+      "default": 400
+    },
+    "taskHeadChars": {
+      "type": "number",
+      "title": "Task notification head (characters)",
+      "description": "A background task's notification is put back as its summary, status and output file, at most this long.",
+      "default": 200
+    },
+    "hostLineChars": {
+      "type": "number",
+      "title": "Host message line (characters)",
+      "description": "Hook feedback, goal check-ins and other host notices are put back as their first line, at most this long.",
+      "default": 120
     },
     "maxStateTokens": {
       "type": "number",

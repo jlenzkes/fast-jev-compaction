@@ -11,26 +11,19 @@ import type {
 import { compact, messageChars, reductionRatio, resolveOptions } from '../src/compact.js';
 import { goalFromMessages } from '../src/state.js';
 import {
-  anchorOf,
-  type Anchor,
-  type Delivery,
+  type Carry,
+  decideCarry,
   fnv1a,
-  digestText,
-  goalMessages,
-  type Ident,
-  isPlainUser,
-  identify,
-  insertPlaced,
-  newId,
-  type Outcome,
-  type Own,
-  plan,
-  receipt,
+  insertPutBacks,
+  noteText,
+  type PutBackOptions,
+  putBackText,
   sha256,
-  speaker,
-  withoutReceipts,
+  submitKind,
+  USER_KINDS,
+  withoutPluginMessages,
 } from './deliveries.js';
-import { type Change, type KV, Ledger, type Record as LedgerRecord } from './ledger.js';
+import { type Found, neighbourOf, type Oversize, readWindow, type Window } from './transcript.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
@@ -67,8 +60,19 @@ export type HookConfig = CompactOptions & {
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
-  /** Append a receipt of what the compaction cut to the history it hands back. */
-  receipt: boolean;
+  /** End the compacted history with a note of what was cut and put back. */
+  note: boolean;
+} & PutBackOptions;
+
+/**
+ * Put-back defaults, set from the seven windows of a real session (DESIGN-NOTES.md,
+ * "The budget"): put-backs cost about a tenth of what a compaction saves.
+ */
+export const PUT_BACK_DEFAULTS: PutBackOptions = {
+  putBackBudget: 15_000,
+  reportHeadChars: 400,
+  taskHeadChars: 200,
+  hostLineChars: 120,
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -106,7 +110,11 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       HOOK_DEFAULTS.minReductionRatio,
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
-    receipt: typeof options['receipt'] === 'boolean' ? options['receipt'] : true,
+    note: typeof options['note'] === 'boolean' ? options['note'] : true,
+    putBackBudget: optionNumber(options, 'putBackBudget', PUT_BACK_DEFAULTS.putBackBudget),
+    reportHeadChars: optionNumber(options, 'reportHeadChars', PUT_BACK_DEFAULTS.reportHeadChars),
+    taskHeadChars: optionNumber(options, 'taskHeadChars', PUT_BACK_DEFAULTS.taskHeadChars),
+    hostLineChars: optionNumber(options, 'hostLineChars', PUT_BACK_DEFAULTS.hostLineChars),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -347,49 +355,12 @@ export function sourceIndices(listed: readonly SessionMessage[], out: readonly S
   return sources;
 }
 
-let lastSeq = 0;
-/** Delivery order: taken when `prompt.submit` is entered, before anything it awaits. */
-function nextSeq(): number {
-  lastSeq = Math.max(Date.now() * 1000, lastSeq + 1);
-  return lastSeq;
-}
-
-/**
- * The store as closures built at the hook: the host's module checker wants
- * `$` spelled `$.noun.event(...)` where it is used, so `$` is never handed on.
- * A host without `$.store` makes them reject, and the record runs in memory.
- */
-function storeOf($: {
-  store: {
-    get: (key: string) => Promise<unknown>;
-    set: (key: string, value: unknown) => Promise<void>;
-    delete: (key: string) => Promise<void>;
-    keys: () => Promise<string[]>;
-  };
-}): KV {
-  return {
-    get: async (key) => $.store.get(key),
-    set: async (key, value) => $.store.set(key, value),
-    remove: async (key) => $.store.delete(key),
-    keys: async () => $.store.keys(),
-  };
-}
-
-async function sessionIdOf($: { session: { id: () => Promise<string> } }): Promise<string> {
-  try {
-    return await $.session.id();
-  } catch {
-    return 'unknown';
-  }
-}
-
 /**
  * A maintainer's aid, off unless the environment variable FAST_JEV_DEBUG_LOG
- * names a file: each `prompt.submit` and `session.compact` dispatch appends one
- * JSON line of values the plugin computed (lengths, 32-bit hashes, tool ids,
- * roles, counts, its own fixed strings), never text from a message. A length
- * and a 32-bit hash still identify a short common prompt ("yes"). The file is
- * cut back to its newest half past 1 MiB.
+ * names a file: each `session.compact` dispatch appends one JSON line of
+ * values the plugin computed (lengths, 32-bit hashes, tool ids, roles, counts,
+ * transcript line numbers, its own fixed strings), never text from a message.
+ * The file is cut back to its newest half past 1 MiB.
  */
 const DEBUG_LOG_MAX_CHARS = 1024 * 1024;
 
@@ -421,34 +392,88 @@ function debugLog($: DebugHost, line: { [key: string]: unknown }): Promise<void>
   return done;
 }
 
-const KNOWN_KINDS = new Set([
-  'composer', 'bridge', 'sdk', 'task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay',
-  'channel', 'coordinator', 'observer', 'observer-activity', 'auto-continuation', 'unclassified', 'slack-ping', 'plugin',
-]);
-
-/** An origin for the debug log: its kind when it is one the plugin knows, else `other`. */
-function originKind(origin: unknown): string | null {
-  if (!origin || typeof origin !== 'object') return null;
-  const kind = (origin as { kind?: unknown }).kind;
-  return typeof kind === 'string' && KNOWN_KINDS.has(kind) ? kind : 'other';
-}
-
-/** Every message of a list, as values the plugin computed; `own` marks what it recognised as its own. */
-function listSummary(messages: readonly SessionMessage[], own?: ReadonlyMap<number, Own>): unknown[] {
-  return messages.map((m, i) => ({
+/** Every message of a list, as values the plugin computed. */
+function listSummary(messages: readonly SessionMessage[]): unknown[] {
+  return messages.map((m) => ({
     role: m.role,
     chars: m.text.length,
     hash: fnv1a(m.text),
     ...(m.toolUses.length ? { uses: m.toolUses.map((t) => t.tool_use_id) } : {}),
     ...(m.toolResults?.length ? { results: m.toolResults.map((r) => r.tool_use_id) } : {}),
-    handle: m.handle !== undefined,
-    ...(own?.has(i) ? { own: own.get(i)!.kind } : {}),
+    handle: m.handle ?? null,
   }));
 }
 
-export { anchorOf, fingerprint, identify, insertPlaced, plan, receipt } from './deliveries.js';
-export type { Anchor, Delivery, Own, Outcome } from './deliveries.js';
-export { LEDGER_MAX_BYTES, LEDGER_MAX_ENTRIES, LEDGER_MAX_SESSIONS } from './ledger.js';
+/** The user's own prompts `prompt.submit` saw accepted, kept in memory, newest last. */
+const SEEN_MAX = 2000;
+
+function chars(messages: readonly SessionMessage[]): number {
+  return messages.reduce((sum, m) => sum + messageChars(m as unknown as Message), 0);
+}
+
+export type PutBackReport = {
+  placed: { listedIndex: number; line: number; text: string }[];
+  whole: number;
+  shortened: { found: Found; confirmed: boolean; carry: Carry }[];
+  leftToHost: number;
+  unlisted: number;
+  oversize: Oversize[];
+  since?: number;
+  stoodDown?: string;
+  readerMs?: number;
+  via?: string;
+};
+
+/**
+ * What to put back, from a window the reader returned: each delivery whose
+ * neighbour went back without its handle (rebuilt or deleted), carried as
+ * `decideCarry` says. Stands down, reporting why, when a listed handle is not
+ * in the file, or when a window with a rebuilt tool round holds no hidden
+ * record at all (the format may have changed; and if it has not, there was
+ * nothing to put back).
+ */
+export async function planPutBacks(
+  listed: readonly SessionMessage[],
+  rebuilt: ReadonlySet<string>,
+  w: Window,
+  seen: ReadonlySet<string>,
+  options: PutBackOptions,
+): Promise<PutBackReport> {
+  const handles = listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string');
+  const report: PutBackReport = { placed: [], whole: 0, shortened: [], leftToHost: 0, unlisted: 0, oversize: [] };
+  const missing = handles.filter((h) => !w.found.has(h));
+  if (missing.length > 0) return { ...report, stoodDown: `${missing.length} listed message(s) are not in the transcript file` };
+  const rebuiltToolRound = listed.some((m) => m.handle !== undefined && rebuilt.has(m.handle) && (m.toolResults?.length ?? 0) > 0);
+  if (w.hidden === 0 && rebuiltToolRound) {
+    return { ...report, stoodDown: 'the transcript shows no hidden record since the last compaction, though tool calls ran; its format may have changed' };
+  }
+  const index = new Map(handles.map((h, i) => [h, listed.findIndex((m) => m.handle === h)] as const));
+  const handleSet = new Set(handles);
+  const acted: { found: Found; confirmed: boolean; listedIndex: number }[] = [];
+  for (const d of w.deliveries) {
+    const nb = neighbourOf(d, w, handleSet);
+    if ('summary' in nb) continue;
+    if ('unlisted' in nb) {
+      report.unlisted++;
+      continue;
+    }
+    if (!rebuilt.has(nb.at)) {
+      report.leftToHost++;
+      continue;
+    }
+    const confirmed = USER_KINDS.has(d.kind) && seen.has(await sha256(d.body));
+    acted.push({ found: d, confirmed, listedIndex: index.get(nb.at)! });
+  }
+  const carry = decideCarry(acted, options);
+  acted.forEach((a, i) => {
+    report.placed.push({ listedIndex: a.listedIndex, line: a.found.line, text: putBackText(a.found, a.confirmed, carry[i]!) });
+    if (carry[i]!.mode === 'whole') report.whole++;
+    else report.shortened.push({ found: a.found, confirmed: a.confirmed, carry: carry[i]! });
+  });
+  report.oversize = w.oversize.filter((x) => x.delivery && x.line > w.boundary);
+  report.since = w.start;
+  return report;
+}
 
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
@@ -459,295 +484,138 @@ export const register: Register = (on: On, options: PluginOptions) => {
   // again each NUDGE_STEP points, so the user picks the moment to /compact.
   let cannotCompact = false;
   const nudges: NudgeState = { nudgedAt: Number.NEGATIVE_INFINITY };
-  // Prompts delivered beside a message rather than as one; see DESIGN-NOTES.md.
-  const ledger = new Ledger();
-  // Names this registration in the debug log.
-  const registration = newId();
+  // The one thing the plugin remembers, in memory only: hashes of the prompts
+  // prompt.submit accepted from the user. A transcript record attributed to the
+  // user has the user's standing only when its text is among them.
+  const seen = new Set<string>();
 
   on('prompt.submit', async ($, event, next) => {
-    const seq = nextSeq();
-    const midTurn = event.turnId !== undefined;
-    // The user's own Enter between turns makes no host call before it enters.
-    const maybe = midTurn || !speaker(event.origin).user;
-    const before = maybe ? await $.session.messages().catch(() => undefined) : undefined;
     const entered = await next(event);
-    const recordIt = entered.drop === undefined && (midTurn || !speaker(entered.origin).user);
-    const log = (outcome: string, listed?: number) =>
-      debugLog($, {
-        ev: 'prompt.submit',
-        registration,
-        origin: originKind(event.origin),
-        accepted: entered.drop !== undefined ? 'dropped' : originKind(entered.origin) ?? 'own',
-        turnId: event.turnId ?? null,
-        wait: event.wait,
-        chars: event.text.length,
-        hash: fnv1a(event.text),
-        attachments: event.attachments?.length ?? 0,
-        listed: listed ?? null,
-        outcome,
-        seq,
-      });
-    if (!recordIt || entered.drop !== undefined) {
-      await log('not recorded');
-      return entered;
+    if (entered.drop === undefined && USER_KINDS.has(submitKind(entered.origin))) {
+      const hash = await sha256(entered.text);
+      seen.delete(hash);
+      seen.add(hash);
+      if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value as string);
     }
-    const body = [entered.text, ...(entered.context ?? [])].filter((part) => part.length > 0).join('\n');
-    const attachments = event.attachments?.length ?? 0;
-    if (!body && attachments === 0) {
-      await log('empty');
-      return entered;
-    }
-    // Between turns, the host may list the delivery as its own message as it
-    // enters; then it is not stored beside anything and needs no record. This
-    // is the first point the plugin can see that.
-    const after = await $.session.messages().catch(() => undefined);
-    const newest = after?.at(-1);
-    if (!midTurn && after && (!before || after.length > before.length) && isPlainUser(newest) && newest!.text === body) {
-      await log('listed by the host', after.length);
-      return entered;
-    }
-    const snapshot = before ?? after;
-    const session = await sessionIdOf($);
-    let anchor: Anchor | undefined;
-    if (snapshot) {
-      // Only the tail is read; the plugin's own receipts there are skipped,
-      // since the next compaction takes them out.
-      const tail = snapshot.slice(-64);
-      const receipts = await ledger.receipts(storeOf($), session).catch(() => []);
-      const own = await identify(tail, { pending: [], placed: [], ours: [], receipts });
-      anchor = anchorOf(tail, new Set([...own].filter(([, o]) => o.kind === 'receipt').map(([i]) => i)));
-    }
-    const delivery: Delivery = { seq, id: newId(), body, midTurn, attachments };
-    if (entered.origin) delivery.origin = entered.origin;
-    if (anchor) delivery.anchor = anchor;
-    await ledger.record(storeOf($), session, delivery);
-    await log('recorded', snapshot?.length);
     return entered;
   });
 
   on('session.compact', async ($, event, next) => {
     nudges.nudgedAt = Number.NEGATIVE_INFINITY;
-    // A subagent's transcript never holds the main loop's deliveries.
-    const main = event.agentId === undefined;
-    // A precompute installs nothing; its result is kept for a compaction that may never come.
-    const speculative = event.trigger === 'precompute';
-    const session = await sessionIdOf($);
-    // Everything that reads the record runs inside this try; anything wrong
-    // in it leaves the plugin compacting as it would with no deliveries.
-    let record: LedgerRecord | undefined;
-    let found: Map<number, Own> = new Map();
-    let own: Map<number, Own> = new Map();
-    let pending: Delivery[] = [];
-    let outcomes: Outcome[] = [];
-    let listed: SessionMessage[] = [...event.messages];
-    let unusable = false;
-    try {
-      if (main) {
-        record = await ledger.read(storeOf($), session);
-        found = await identify(event.messages, record);
-        listed = withoutReceipts(event.messages, found);
-        // Indices into `listed` from here on.
-        own = await identify(listed, record);
-        pending = record.pending;
-        outcomes = plan(listed, pending, own);
-      }
-    } catch {
-      unusable = true;
-      record = undefined;
-      found = new Map();
-      own = new Map();
-      pending = [];
-      outcomes = [];
-      listed = [...event.messages];
-    }
-    const removed = event.messages.length - listed.length;
-    const restored = pending.flatMap((delivery, n) => {
-      const o = outcomes[n]!;
-      return o.kind === 'placed' ? [o.estimate ? { delivery, estimate: o.estimate } : { delivery }] : [];
-    });
-    // Orphans from anyone but the user go into one digest, a line each.
-    const digested = pending
-      .filter((_, n) => outcomes[n]!.kind === 'digested')
-      .sort((a, b) => a.seq - b.seq);
-    const transcript = main ? await transcriptPath($) : undefined;
-    const digest = digested.length ? { id: newId(), text: '' } : undefined;
-    if (digest) digest.text = digestText(digest.id, digested, transcript);
-    const tally = (kind: Outcome['kind']) => outcomes.filter((o) => o.kind === kind).length;
-    await debugLog($, {
-      ev: 'session.compact',
-      registration,
-      trigger: event.trigger,
-      agentId: event.agentId ?? null,
-      listed: event.messages.length,
-      removed,
-      recorded: pending.length,
-      seen: tally('seen'),
-      present: tally('listed'),
-      keptByHost: tally('kept-by-host'),
-      placed: tally('placed'),
-      digested: tally('digested'),
-      waiting: tally('waiting'),
-      durable: record?.durable ?? null,
-      unusable,
-      messages: listSummary(event.messages, found),
-    });
-
-    /** What this compaction's outcome changes in the record; nothing for a precompute but its receipt. */
-    const settle = async (installed: boolean, returned: readonly SessionMessage[], receiptId?: Ident) => {
-      if (!record) return;
-      const placedOwn = [...own.values()].filter((o): o is Extract<Own, { kind: 'put-back' }> => o.kind === 'put-back');
-      const change: Change = {
-        retire: [],
-        placed: [],
-        reanchor: new Map(),
-        placedSettled: [],
-        oursAdded: [],
-        missingAdded: 0,
-        receiptsRemoved: [],
-        reported: false,
-      };
-      // What the listing shows is settled whatever this compaction becomes.
-      for (const o of placedOwn) {
-        if (o.pending !== undefined) change.retire.push(o.pending);
-        if (o.pending !== undefined || o.placed) {
-          change.oursAdded.push({ id: o.id, sha: o.sha, ...(o.user ? { user: true } : {}), ...(o.digest ? { digest: true } : {}) });
-        }
-        if (o.placed) change.placedSettled.push(o.id);
-      }
-      outcomes.forEach((o, n) => {
-        if (o.kind === 'listed') change.retire.push(pending[n]!.seq);
-      });
-      if (receiptId) change.receiptAdded = receiptId;
-      if (!speculative) {
-        const seenPlaced = new Set(placedOwn.filter((o) => o.placed).map((o) => o.id));
-        for (const p of record.placed) {
-          if (!seenPlaced.has(p.id)) {
-            change.placedSettled.push(p.id);
-            change.missingAdded++;
-          }
-        }
-        change.receiptsRemoved = [...found.values()].filter((o) => o.kind === 'receipt').map((o) => o.id);
-        const anchor = anchorOf(returned);
-        for (const [n, o] of outcomes.entries()) {
-          const d = pending[n]!;
-          if (o.kind === 'waiting') change.reanchor.set(d.seq, anchor);
-          if (!installed) continue;
-          // Measured: the host keeps what sits beside a plain user message the plugin hands back whole.
-          if (o.kind === 'kept-by-host') change.retire.push(d.seq);
-          if (o.kind === 'placed') {
-            change.placed.push({ id: d.id, sha: await sha256(o.text), seq: d.seq, ...(speaker(d.origin).user ? { user: true } : {}) });
-          }
-          // A digested delivery's text goes; the digest stands for it until a listing shows the digest.
-          if (o.kind === 'digested') change.retire.push(d.seq);
-        }
-        if (installed && digest) change.placed.push({ id: digest.id, sha: await sha256(digest.text), seq: digested[0]!.seq, digest: true });
-        change.reported = installed && receiptId !== undefined;
-      }
-      await ledger.commit(storeOf($), session, change);
-    };
-
-    // The built-in summary is handed the history with the deliveries put back
-    // and the plugin's receipts out. Nothing is retired for being handed to it:
-    // a summary is no evidence that a delivery survived.
-    const builtIn = async () => {
-      const handed =
-        restored.length > 0 || digest || removed > 0
-          ? { ...event, messages: insertPlaced(listed, listed.map((_, i) => i), pending, outcomes, digest?.text) }
-          : event;
-      const compacted = await next(handed);
-      if (compacted.skip === undefined) await settle(false, compacted.messages ?? []).catch(() => undefined);
-      return compacted;
-    };
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      // Base behaviour unless the history holds a message the plugin wrote:
-      // then the goal is taken from the rest, a put-back of the user's own
-      // words read as those words. A configured goal always wins.
-      if (!config.goal && found.size > 0) {
-        const goal = goalFromMessages(goalMessages(listed, own));
-        if (goal) config.goal = goal;
-      }
-      // The library sees the listed messages, less the plugin's receipts;
-      // put-backs are inserted afterwards.
-      const { result, messages } = await compactSession(listed, config, async (url, init) => {
+      const listed = event.messages;
+      const goal = config.goal ?? goalFromMessages(withoutPluginMessages(listed) as unknown as Message[]);
+      const { result, messages } = await compactSession(listed, { ...config, goal }, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
+        notify($, `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`);
+        return next(event);
+      }
+
+      // What the host stored beside a message it no longer gets back whole.
+      const kept = new Set(messages.map((m) => m.handle).filter((h): h is string => typeof h === 'string'));
+      const rebuilt = new Set(listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string' && !kept.has(h)));
+      const transcript = await transcriptPath($);
+      let report: PutBackReport = { placed: [], whole: 0, shortened: [], leftToHost: 0, unlisted: 0, oversize: [] };
+      if (event.agentId !== undefined) {
+        // A subagent's own transcript is not the session file this reads.
+      } else if (rebuilt.size > 0) {
+        if (!transcript) report.stoodDown = 'the transcript file was not found';
+        else {
+          try {
+            const windows = (await $.env.get('OS')) === 'Windows_NT';
+            const read = await readWindow(
+              {
+                stat: (path) => $.fs.stat(path),
+                read: (path) => $.fs.read(path),
+                run: (argv, init) => $.process.run(argv, init),
+              },
+              windows,
+              transcript,
+              listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string'),
+              () => Date.now(),
+            );
+            report = { ...(await planPutBacks(listed, rebuilt, read.window, seen, config)), readerMs: read.ms, via: read.via };
+          } catch (error) {
+            report.stoodDown = `the transcript could not be read (${error instanceof Error ? error.message : String(error)})`;
+          }
+        }
+      }
+      let out = insertPutBacks(messages, sourceIndices(listed, messages), report.placed);
+      const putBackChars = chars(out) - chars(messages);
+      if (config.note) {
+        out = [
+          ...out,
+          {
+            role: 'user',
+            toolUses: [],
+            text: noteText({
+              listed: listed.length,
+              kept: messages.length,
+              rebuilt: rebuilt.size,
+              stubbed: result.stats.callsStubbed,
+              resultsCut: result.stats.resultsDropped,
+              callsDeleted: result.stats.callsDropped + result.stats.stubsDropped,
+              ...(report.since !== undefined ? { since: report.since } : {}),
+              ...(report.stoodDown !== undefined ? { stoodDown: report.stoodDown } : {}),
+              whole: report.whole,
+              shortened: report.shortened,
+              leftToHost: report.leftToHost,
+              unlisted: report.unlisted,
+              oversize: report.oversize,
+              ...(transcript ? { transcript } : {}),
+            }),
+          },
+        ];
+      }
+      const before = chars(listed);
+      const saved = before - chars(messages);
+      const ratio = before > 0 ? 1 - chars(out) / before : 0;
+      const parts = [
+        `${rebuilt.size} rebuilt or deleted`,
+        report.placed.length > 0 ? `${report.whole} put back whole, ${report.shortened.length} shortened` : '',
+        report.leftToHost > 0 ? `${report.leftToHost} left to the host` : '',
+        report.unlisted > 0 ? `${report.unlisted} beside messages not listed` : '',
+        report.stoodDown ? `put-backs stood down: ${report.stoodDown}` : '',
+      ].filter(Boolean);
+      const cost = report.placed.length > 0 && saved > 0 ? `; put-backs ${putBackChars} chars, ${percent(putBackChars / saved)} of the saving` : '';
+      const reader = report.readerMs !== undefined ? `; transcript read by ${report.via} in ${report.readerMs} ms` : '';
+      await debugLog($, {
+        ev: 'session.compact',
+        trigger: event.trigger,
+        agentId: event.agentId ?? null,
+        listed: listSummary(listed),
+        rebuilt: rebuilt.size,
+        placed: report.placed.map((p) => p.line),
+        shortened: report.shortened.map((s) => s.found.line),
+        leftToHost: report.leftToHost,
+        unlisted: report.unlisted,
+        stoodDown: report.stoodDown ?? null,
+        readerMs: report.readerMs ?? null,
+        via: report.via ?? null,
+        putBackChars,
+      });
+      if (ratio < config.minReductionRatio) {
         notify(
           $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum with put-backs: ${percent(ratio)}${cost}; ${summarize(result)})`,
         );
-        return builtIn();
+        return next(event);
       }
-      const out = insertPlaced(messages, sourceIndices(listed, messages), pending, outcomes, digest?.text);
-      const whole = messages.filter((m) => m.handle !== undefined).length;
-      const counts = {
-        listed: listed.length,
-        kept: messages.length,
-        rebuilt: messages.length - whole,
-        deleted: listed.length - messages.length,
-      };
-      let returned = out;
-      let receiptId: Ident | undefined;
-      // A subagent's compaction gets no receipt: the transcript and the
-      // deliveries this plugin knows are the main conversation's.
-      if (config.receipt && main) {
-        const missing = (record?.missing ?? 0) + (record ? record.placed.filter((p) => ![...own.values()].some((o) => o.id === p.id)).length : 0);
-        const id = newId();
-        const text = receipt({
-          id,
-          ...counts,
-          stubbed: result.stats.callsStubbed,
-          resultsCut: result.stats.resultsDropped,
-          callsDeleted: result.stats.callsDropped + result.stats.stubsDropped,
-          restored,
-          ...(digest ? { digest: { id: digest.id, count: digested.length } } : {}),
-          dropped: record?.dropped ?? 0,
-          named: record?.named ?? [],
-          unreadable: (record?.unreadable ?? 0) + (unusable ? 1 : 0),
-          old: record?.old ?? 0,
-          missing: speculative ? 0 : missing,
-          durable: record?.durable ?? true,
-          ...(transcript ? { transcript } : {}),
-        });
-        receiptId = { id, sha: await sha256(text) };
-        returned = [...out, { role: 'user', text, toolUses: [] }];
-      }
-      // The reduction the banner states is of the history as returned, against
-      // what the session held: the listed messages and the deliveries beside them.
-      const before =
-        event.messages.reduce((sum, m) => sum + messageChars(m), 0) +
-        restored.reduce((sum, r) => sum + r.delivery.body.length, 0) +
-        digested.reduce((sum, d) => sum + d.body.length, 0);
-      const after = returned.reduce((sum, m) => sum + messageChars(m), 0);
-      const parts = [
-        `${counts.rebuilt} rebuilt and ${counts.deleted} deleted, without what the host stores beside them`,
-        restored.length > 0 ? `${restored.length} delivered prompt(s) put back` : '',
-        digested.length > 0 ? `${digested.length} earlier one(s) from others listed in a digest` : '',
-        removed > 0 ? `${removed} earlier receipt(s) replaced` : '',
-      ].filter(Boolean);
       notify(
         $,
-        `kept ${counts.kept}/${counts.listed} listed messages (${parts.join('; ')}), no summary (${percent(
-          before === 0 ? 0 : (before - after) / before,
-        )} smaller as returned; ${summarize(result).replace(/^-?\d+% reduction; /, '')})`,
+        `kept ${messages.length}/${listed.length} listed messages (${parts.join('; ')}), no summary (${percent(ratio)} smaller as returned${
+          report.placed.length > 0 ? `, ${percent(saved / before)} before put-backs` : ''
+        }${cost}${reader}; ${summarize(result)})`,
       );
-      await settle(true, out, receiptId).catch(() => undefined);
-      await debugLog($, {
-        ev: 'session.compact.returned',
-        registration,
-        trigger: event.trigger,
-        messages: listSummary(returned),
-      });
-      return { messages: returned };
+      return { messages: out };
     } catch (error) {
-      notify(
-        $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
-      );
-      return builtIn();
+      notify($, `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
+      return next(event);
     }
   });
 
