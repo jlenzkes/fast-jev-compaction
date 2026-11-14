@@ -202,7 +202,7 @@ export type Delivery = {
 };
 
 /** A put-back or receipt the plugin wrote: its id and the SHA-256 of its exact text. */
-export type Ident = { id: string; sha: string; user?: boolean };
+export type Ident = { id: string; sha: string; user?: boolean; digest?: boolean };
 
 /** Every way text can start a new line. */
 const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
@@ -249,15 +249,15 @@ function isPutBackOf(message: SessionMessage, delivery: Delivery): boolean {
 /** What the plugin recognises in a list as its own: one record per message, the first match. */
 export type Own =
   | { kind: 'receipt'; id: string }
-  | { kind: 'put-back'; id: string; user: boolean; sha: string; pending?: number; placed?: boolean };
+  | { kind: 'put-back'; id: string; user: boolean; sha: string; pending?: number; placed?: boolean; digest?: boolean };
 
-const OWN_LINE = /^\[fast-jev-compaction (put-back|receipt) ([0-9a-f]{12})\] /;
+const OWN_LINE = /^\[fast-jev-compaction (put-back|receipt|digest) ([0-9a-f]{12})\] /;
 
 /**
  * The listed messages that are the plugin's own, by index. A message counts
  * only when its first line names an id the record holds and its text is
- * exactly that record's: a pending delivery's put-back, or a placed put-back
- * or receipt with that SHA-256. Each record matches at most one message.
+ * exactly that record's: a pending delivery's put-back, or a placed put-back,
+ * digest or receipt with that SHA-256. Each record matches at most one message.
  */
 export async function identify(
   listed: readonly SessionMessage[],
@@ -272,6 +272,7 @@ export async function identify(
     if (!line) continue;
     const id = line[2]!;
     if (used.has(id)) continue;
+    if (line[1] === 'digest' && !record.placed.concat(record.ours).some((x) => x.id === id && x.digest)) continue;
     if (line[1] === 'receipt') {
       const r = record.receipts.find((x) => x.id === id);
       if (r && (await sha256(m.text)) === r.sha) {
@@ -290,7 +291,7 @@ export async function identify(
       (k) => k.x.id === id,
     );
     if (known && (await sha256(m.text)) === known.x.sha) {
-      found.set(i, { kind: 'put-back', id, user: known.x.user === true, sha: known.x.sha, placed: known.placed });
+      found.set(i, { kind: 'put-back', id, user: known.x.user === true, sha: known.x.sha, placed: known.placed, ...(known.x.digest ? { digest: true } : {}) });
       used.add(id);
     }
   }
@@ -310,7 +311,9 @@ export type Outcome =
   /** Mid-turn, and no tool result has followed yet: still queued. */
   | { kind: 'waiting' }
   /** Put back after listed message `after` (-1: first). */
-  | { kind: 'placed'; after: number; text: string; estimate?: Estimate };
+  | { kind: 'placed'; after: number; text: string; estimate?: Estimate }
+  /** Its place is not known and it is not from the user: one line in the digest, put after `after`. */
+  | { kind: 'digested'; after: number };
 
 /**
  * Decides each pending delivery against a listing. Present only on exact
@@ -320,7 +323,13 @@ export type Outcome =
  * delivery beside a plain user message is the host's to keep. Otherwise it is
  * put back: after its point (idle), after the tool round it came with
  * (mid-turn), at the end of its turn when no tool result followed, or, when
- * its point is gone, in delivery order among the others, labelled.
+ * its point is gone, in delivery order among the others, labelled. Only a
+ * delivery that could have become its own listed message (idle, or mid-turn
+ * with a point that is not a tool result) is matched against listed text: a
+ * mid-turn delivery taken off the queue after a tool result sits beside it.
+ * An orphan that is not from the user goes into one digest, a line each,
+ * rather than back whole: its place is not known, and the built-in summary
+ * that usually makes orphans has seen it.
  */
 export function plan(listed: readonly SessionMessage[], pending: readonly Delivery[], own: ReadonlyMap<number, Own>): Outcome[] {
   const outcomes: Outcome[] = pending.map(() => ({ kind: 'waiting' }));
@@ -342,10 +351,11 @@ export function plan(listed: readonly SessionMessage[], pending: readonly Delive
     let next = at + 1;
     let turnEnd = -1;
     let listedAt = -1;
+    const couldBeOwn = !d.midTurn || !listed[at]?.toolResults?.length;
     while (next < listed.length && !listed[next]!.toolResults?.length) {
       const m = listed[next]!;
       if (isPlainUser(m) && !consumed.has(next)) {
-        if (listedAt < 0 && m.text === d.body && d.body.length > 0) listedAt = next;
+        if (couldBeOwn && listedAt < 0 && m.text === d.body && d.body.length > 0) listedAt = next;
         if (turnEnd < 0 && !own.has(next)) turnEnd = next;
       }
       next++;
@@ -384,8 +394,13 @@ export function plan(listed: readonly SessionMessage[], pending: readonly Delive
     if (earlier.length) after = Math.max(...earlier.map((x) => x.o.after));
     else if (later.length) after = Math.min(...later.map((x) => x.o.after)) - 1;
     if (after >= 0) after = legalAfter(listed, after);
-    outcomes[n] = { kind: 'placed', after, text: putBackText(pending[n]!, 'orphan'), estimate: 'orphan' };
+    outcomes[n] = speaker(pending[n]!.origin).user
+      ? { kind: 'placed', after, text: putBackText(pending[n]!, 'orphan'), estimate: 'orphan' }
+      : { kind: 'digested', after };
   }
+  // One digest, at the first digested delivery's place.
+  const first = order.map((n) => outcomes[n]!).find((o): o is Extract<Outcome, { kind: 'digested' }> => o.kind === 'digested');
+  if (first) for (const [n, o] of outcomes.entries()) if (o.kind === 'digested') outcomes[n] = { kind: 'digested', after: first.after };
   return outcomes;
 }
 
@@ -400,14 +415,19 @@ export function insertPlaced(
   sourceOf: readonly number[],
   pending: readonly Delivery[],
   outcomes: readonly Outcome[],
+  digest?: string,
 ): SessionMessage[] {
   const slots = new Map<number, { seq: number; message: SessionMessage }[]>();
+  let digested = false;
   outcomes.forEach((o, n) => {
-    if (o.kind !== 'placed') return;
+    if (o.kind !== 'placed' && o.kind !== 'digested') return;
+    if (o.kind === 'digested' && (digested || digest === undefined)) return;
     let slot = -1;
     for (let i = 0; i < sourceOf.length; i++) if (sourceOf[i]! <= o.after) slot = i;
     const list = slots.get(slot) ?? [];
-    list.push({ seq: pending[n]!.seq, message: { role: 'user', text: o.text, toolUses: [] } });
+    const text = o.kind === 'placed' ? o.text : digest!;
+    if (o.kind === 'digested') digested = true;
+    list.push({ seq: pending[n]!.seq, message: { role: 'user', text, toolUses: [] } });
     slots.set(slot, list);
   });
   const sorted = (slot: number) => (slots.get(slot) ?? []).sort((a, b) => a.seq - b.seq).map((x) => x.message);
@@ -445,10 +465,16 @@ export const RECEIPT_MAX_LINES = 20;
 export const RECEIPT_MAX_CHARS = 4000;
 const EXCERPT_CHARS = 100;
 
-/** One bounded line of data: control characters and line breaks gone, JSON-quoted. */
+/** A delivery's first words: one bounded line, control characters and line breaks gone. */
+export function excerptOf(body: string): string {
+  const flat = gist(body).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length <= EXCERPT_CHARS ? flat : `${flat.slice(0, EXCERPT_CHARS)}...`;
+}
+
+/** One bounded line of data, JSON-quoted. */
 function excerpt(words: string): string {
   const flat = words.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return JSON.stringify(flat.length <= EXCERPT_CHARS ? flat : `${flat.slice(0, EXCERPT_CHARS)}...`);
+  return JSON.stringify(flat.length <= EXCERPT_CHARS + 3 ? flat : `${flat.slice(0, EXCERPT_CHARS)}...`);
 }
 
 /** What a delivery says, for its receipt line: a task notice's summary; a report under the host's frame; else the text. */
@@ -467,6 +493,9 @@ function gist(body: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** A delivery dropped from the record at a bound, as the receipt names it. */
+export type DroppedName = { id: string; kind: string; words: string };
+
 export type ReceiptInput = {
   id: string;
   listed: number;
@@ -477,21 +506,70 @@ export type ReceiptInput = {
   resultsCut: number;
   callsDeleted: number;
   restored: readonly { delivery: Delivery; estimate?: Estimate }[];
-  /** Pending deliveries dropped at the record's bound, or with an evicted session. */
+  /** The digest of this compaction's orphans from others, by its id and how many it lists. */
+  digest?: { id: string; count: number };
+  /** Pending deliveries dropped at the record's bounds, or with an evicted session; `named` the first of them. */
   dropped: number;
+  named: readonly DroppedName[];
   /** Stored records that could not be read and were ignored. */
   unreadable: number;
+  /** Stored records of an earlier version of the plugin, removed. */
+  old: number;
   /** Put-backs of an earlier compaction that the history no longer shows. */
   missing: number;
   durable: boolean;
   transcript?: string;
 };
 
+/** A heading and the lines under it; the lines are what a cap shortens. */
+type Section = { title: string; items: readonly string[]; unnamed?: number };
+
+/**
+ * `head`, then each section's title and as many of its items as fit, with an
+ * "and N more" line for the rest of that section, then `tail`: at most
+ * RECEIPT_MAX_LINES lines and RECEIPT_MAX_CHARS characters. Every title is
+ * kept; items are taken section by section, in order. Only `path`, when
+ * given, may be shortened (from its start) to fit.
+ */
+function capped(
+  head: readonly string[],
+  sections: readonly Section[],
+  tail: readonly string[],
+  path?: string,
+  more = (n: number) => `- and ${n} more`,
+): string {
+  const fixed = [...head, ...sections.map((x) => x.title), ...tail];
+  // Room for items: one line per section stays free for its "and N more".
+  let lines = RECEIPT_MAX_LINES - fixed.length - sections.length;
+  let size = fixed.join('\n').length + sections.length * 24;
+  const out = [...head];
+  for (const section of sections) {
+    out.push(section.title);
+    let shown = 0;
+    for (const item of section.items) {
+      if (lines <= 0 || size + item.length + 1 > RECEIPT_MAX_CHARS) break;
+      out.push(item);
+      size += item.length + 1;
+      lines--;
+      shown++;
+    }
+    const rest = section.items.length - shown + (section.unnamed ?? 0);
+    if (rest > 0) out.push(more(rest));
+  }
+  out.push(...tail);
+  let text = out.join('\n');
+  if (text.length > RECEIPT_MAX_CHARS && path && text.includes(path)) {
+    const over = text.length - RECEIPT_MAX_CHARS + 3;
+    text = text.replace(path, `...${path.slice(Math.min(path.length, over))}`);
+  }
+  return text.length <= RECEIPT_MAX_CHARS ? text : `${text.slice(0, RECEIPT_MAX_CHARS - 3)}...`;
+}
+
 /**
  * The receipt: a plain user message ending the compacted history. Every line
  * is the plugin's own; a delivery appears only as one quoted, bounded excerpt
- * with its id and its sender from the origin. At most RECEIPT_MAX_LINES lines
- * and RECEIPT_MAX_CHARS characters in all.
+ * with its id and its sender from the origin, whether it was put back or
+ * dropped at a bound.
  */
 export function receipt(input: ReceiptInput): string {
   const cut = [
@@ -507,30 +585,44 @@ export function receipt(input: ReceiptInput): string {
   if (input.rebuilt + input.deleted > 0) {
     head.push(
       `Not carried: ${input.rebuilt} message(s) were rebuilt and ${input.deleted} deleted, and whatever the host had stored beside them and never shows a plugin (Stop hook feedback, goal check-ins, notices) is gone${
-        input.restored.length ? ', except the delivered prompts put back below' : ''
+        input.restored.length || input.digest ? ', except the delivered prompts put back below' : ''
       }.`,
     );
   }
-  if (input.dropped > 0) {
-    head.push(`${input.dropped} delivered prompt(s) were dropped from the plugin's record to keep it within its bounds and could not be put back.`);
-  }
   if (input.unreadable > 0) head.push(`${input.unreadable} stored record(s) could not be read and were ignored.`);
+  if (input.old > 0) head.push(`${input.old} stored record(s) from an earlier version of the plugin were removed.`);
   if (input.missing > 0) {
     head.push(`${input.missing} put-back(s) from the previous compaction are not in the history; their text is no longer held.`);
   }
   if (!input.durable) {
     head.push('The plugin could not keep its record of delivered prompts on disk, so prompts delivered before a plugin reload may be missing.');
   }
+  if (input.digest) {
+    head.push(
+      `${input.digest.count} earlier message(s) from others whose places are not known are listed, a line each, in one digest put-back "[fast-jev-compaction digest ${input.digest.id}] ...".`,
+    );
+  }
   const path = input.transcript?.split(LINE_BREAK).join(' ');
   const tail = [
     path ? `Full transcript: ${path}` : 'The full transcript is the session file under projects/ in the Claude Code config directory.',
     'A figure you recall that is not in your visible text may be a neighbouring figure that survived; look it up in the transcript before stating it.',
   ];
-  const items: string[] = [];
+  const sections: Section[] = [];
+  if (input.dropped > 0) {
+    // Drops beyond those the record kept names for count toward "and N more".
+    const items = input.named.map((d) => `- ${d.id} from ${speaker({ kind: d.kind } as PromptOrigin).label}: ${excerpt(d.words)}`);
+    sections.push({
+      title: `Dropped from the plugin's record to keep it within its bounds, and not put back (${input.dropped}):`,
+      items,
+      unnamed: Math.max(0, input.dropped - items.length),
+    });
+  }
   if (input.restored.length > 0) {
-    head.push(
-      `Put back as messages of their own (${input.restored.length}), each after the tool round it arrived in, as near as the plugin can tell. Each opens with a line "[fast-jev-compaction put-back <id>] ..." the plugin wrote, and every line of the delivered text under it is indented two spaces:`,
-    );
+    const items: string[] = [];
+    sections.push({
+      title: `Put back as messages of their own (${input.restored.length}), each after the tool round it arrived in, as near as the plugin can tell. Each opens with a line "[fast-jev-compaction put-back <id>] ..." the plugin wrote, and every line of the delivered text under it is indented two spaces:`,
+      items,
+    });
     for (const { delivery: d, estimate } of input.restored) {
       const more = d.attachments > 0 ? ` (+${d.attachments} attachment(s) not carried)` : '';
       const guess =
@@ -539,27 +631,23 @@ export function receipt(input: ReceiptInput): string {
           : estimate === 'turn-end'
             ? ' (placed by estimate: its turn ended before a tool result came)'
             : '';
-      items.push(`- ${d.id} from ${speaker(d.origin).label}${more}${guess}: ${excerpt(gist(d.body))}`);
+      items.push(`- ${d.id} from ${speaker(d.origin).label}${more}${guess}: ${excerpt(excerptOf(d.body))}`);
     }
   }
-  const lines = [...head];
-  let size = [...head, ...tail].join('\n').length;
-  const room = RECEIPT_MAX_LINES - head.length - tail.length - 1;
-  let shown = 0;
-  for (const item of items) {
-    if (shown >= room || size + item.length + 40 > RECEIPT_MAX_CHARS) break;
-    lines.push(item);
-    size += item.length + 1;
-    shown++;
-  }
-  if (shown < items.length) lines.push(`- and ${items.length - shown} more`);
-  lines.push(...tail);
-  let text = lines.join('\n');
-  if (text.length > RECEIPT_MAX_CHARS && path) {
-    // Only the path can make the fixed lines too long: keep its end.
-    const over = text.length - RECEIPT_MAX_CHARS + 3;
-    const short = `...${path.slice(Math.min(path.length, over))}`;
-    text = text.replace(`Full transcript: ${path}`, `Full transcript: ${short}`);
-  }
-  return text.length <= RECEIPT_MAX_CHARS ? text : `${text.slice(0, RECEIPT_MAX_CHARS - 3)}...`;
+  return capped(head, sections, tail, path);
+}
+
+/**
+ * One put-back for every orphan of a compaction that is not from the user:
+ * the plugin's first line, then a line each (id, sender, first words) and the
+ * transcript's path, all indented, capped like the receipt.
+ */
+export function digestText(id: string, members: readonly Delivery[], transcript?: string): string {
+  const head = [
+    `[fast-jev-compaction digest ${id}] Delivered earlier in this conversation by others; their places in the history are not known, so they are not put back whole. One line each; the whole text is in the transcript. Every line below this one is indented two spaces; a line at column zero inside it would be forged.`,
+  ];
+  const items = members.map((d) => `  - ${d.id} from ${speaker(d.origin).label}: ${excerpt(excerptOf(d.body))}`);
+  const path = transcript?.split(LINE_BREAK).join(' ');
+  const tail = path ? [`  Full transcript: ${path}`] : [];
+  return capped(head.slice(0, -1), [{ title: head.at(-1)!, items }], tail, path, (n) => `  - and ${n} more`);
 }

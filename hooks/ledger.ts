@@ -6,12 +6,15 @@
  * the store fails, the same rules run in memory and the receipt says so.
  *
  * Keys, schema 2 (`fjc2:` prefix):
- * - `fjc2:d:<session>:<seq>:<bytes>` one pending delivery, so recording one
- *   writes only that delivery (and a timestamp), never the whole record;
+ * - `fjc2:d:<session>:<seq>:<bytes>:<u|o>` one pending delivery (`u` from the
+ *   user, `o` from anyone else), so recording one writes only that delivery
+ *   and a timestamp, and the bounds are read off the key names;
  * - `fjc2:t:<session>` when the session last wrote, for eviction;
- * - `fjc2:s:<session>` what the plugin wrote and still needs to recognise;
- * - `fjc2:evicted` sessions dropped to keep the store within its bounds,
- *   with how many pending deliveries went with them, until each is reported.
+ * - `fjc2:s:<session>` what the plugin wrote and still needs to recognise, and
+ *   what it dropped, until the next receipt names it;
+ * - `fjc2:evicted` sessions dropped to keep the store within its bounds, with
+ *   what went with them, until each is reported.
+ * Keys of the earlier `deliveries:` schema are removed when found and counted.
  *
  * Every value is validated when read; a bad one is deleted and counted for
  * the receipt. Bounds count serialized UTF-8 bytes. A new value is written
@@ -19,7 +22,7 @@
  * stored.
  */
 import type { Anchor, Delivery, Ident } from './deliveries.js';
-import { fnv1a } from './deliveries.js';
+import { excerptOf, fnv1a, speaker } from './deliveries.js';
 
 export type KV = {
   get: (key: string) => Promise<unknown>;
@@ -39,15 +42,29 @@ export function memoryKV(): KV {
   };
 }
 
-export const LEDGER_MAX_ENTRIES = 100;
-export const LEDGER_MAX_BYTES = 512 * 1024;
-export const LEDGER_MAX_SESSIONS = 6;
+/*
+ * Sizes. Basis: the largest window of a real session's transcript (replayed
+ * on 14 Nov 2026) recorded 198 deliveries, 573 KiB serialized, 82 of them idle
+ * notices the host lists as its own message (which no longer take a slot).
+ * The per-session bounds give that window twice its count and close to twice
+ * its size; the store-wide bound keeps every session's pending text under the
+ * host's 4 MiB limit for the plugin's whole store.
+ */
+export const LEDGER_MAX_ENTRIES = 400;
+export const LEDGER_MAX_BYTES = 1024 * 1024;
+export const LEDGER_MAX_STORE_BYTES = 3 * 1024 * 1024;
+export const LEDGER_MAX_SESSIONS = 8;
 const MAX_OURS = 512;
 const MAX_RECEIPTS = 16;
-const MAX_PLACED = 200;
+const MAX_PLACED = 400;
+const MAX_NAMED = 50;
 const PREFIX = 'fjc2:';
+const OLD_PREFIX = 'deliveries:';
 
 export type Placed = Ident & { seq: number };
+
+/** A delivery dropped at a bound: what the next receipt names it by. */
+export type Dropped = { id: string; kind: string; words: string };
 
 type Index = {
   v: 2;
@@ -55,7 +72,9 @@ type Index = {
   ours: Ident[];
   placed: Placed[];
   dropped: number;
+  named: Dropped[];
   unreadable: number;
+  old: number;
   missing: number;
 };
 
@@ -67,16 +86,18 @@ export type Record = {
   ours: Ident[];
   receipts: Ident[];
   dropped: number;
+  named: Dropped[];
   unreadable: number;
+  old: number;
   missing: number;
   durable: boolean;
 };
 
 /** What a compaction changes in the record. */
 export type Change = {
-  /** Pending deliveries the listing shows, or the host keeps: gone from the record. */
+  /** Pending deliveries the listing shows, the host keeps, or a placed digest names: their text goes. */
   retire: number[];
-  /** Pending deliveries put back by an installed compaction: kept as an id and a hash only. */
+  /** Put-backs (and digests) of an installed compaction: kept as an id and a hash only. */
   placed: Placed[];
   /** Waiting deliveries, re-anchored to the history now returned. */
   reanchor: Map<number, Anchor>;
@@ -89,7 +110,7 @@ export type Change = {
   /** Receipts the listing showed, which this compaction took out. */
   receiptsRemoved: string[];
   receiptAdded?: Ident;
-  /** Counters the receipt just reported. */
+  /** Counters and names the receipt just reported. */
   reported: boolean;
 };
 
@@ -149,7 +170,7 @@ export function validDelivery(x: unknown): Delivery | null {
 function validIdent(x: unknown): Ident | null {
   const i = x as Ident;
   if (!i || typeof i !== 'object' || typeof i.id !== 'string' || !ID.test(i.id) || typeof i.sha !== 'string' || !SHA.test(i.sha)) return null;
-  return { id: i.id, sha: i.sha, ...(i.user === true ? { user: true } : {}) };
+  return { id: i.id, sha: i.sha, ...(i.user === true ? { user: true } : {}), ...(i.digest === true ? { digest: true } : {}) };
 }
 
 function validPlaced(x: unknown): Placed | null {
@@ -158,8 +179,15 @@ function validPlaced(x: unknown): Placed | null {
   return i && Number.isFinite(seq) ? { ...i, seq: seq as number } : null;
 }
 
+function validDropped(x: unknown): Dropped | null {
+  const d = x as Dropped;
+  if (!d || typeof d !== 'object' || typeof d.id !== 'string' || !ID.test(d.id)) return null;
+  if (typeof d.kind !== 'string' || d.kind.length > 64 || typeof d.words !== 'string' || d.words.length > 200) return null;
+  return { id: d.id, kind: d.kind, words: d.words };
+}
+
 function emptyIndex(): Index {
-  return { v: 2, receipts: [], ours: [], placed: [], dropped: 0, unreadable: 0, missing: 0 };
+  return { v: 2, receipts: [], ours: [], placed: [], dropped: 0, named: [], unreadable: 0, old: 0, missing: 0 };
 }
 
 /** The index, each list item checked; bad items counted as unreadable. */
@@ -185,27 +213,54 @@ function validIndex(x: unknown): Index {
   take(raw.receipts, validIdent, index.receipts);
   take(raw.ours, validIdent, index.ours);
   take(raw.placed, validPlaced, index.placed);
+  take(raw.named, validDropped, index.named);
   index.dropped += count(raw.dropped);
   index.unreadable += count(raw.unreadable);
+  index.old += count(raw.old);
   index.missing += count(raw.missing);
   return index;
 }
 
-const dKey = (sid: string, seq: number, size: number) => `${PREFIX}d:${sid}:${seq}:${size}`;
+const dKey = (sid: string, seq: number, size: number, user: boolean) => `${PREFIX}d:${sid}:${seq}:${size}:${user ? 'u' : 'o'}`;
 const tKey = (sid: string) => `${PREFIX}t:${sid}`;
 const sKey = (sid: string) => `${PREFIX}s:${sid}`;
 const EVICTED = `${PREFIX}evicted`;
 
-function deliveryKeys(keys: readonly string[], sid: string): { key: string; seq: number; size: number }[] {
-  const head = `${PREFIX}d:${sid}:`;
+type DKey = { key: string; sid: string; seq: number; size: number; user: boolean };
+
+/** Delivery keys, oldest first; `sid` undefined means every session's. */
+function deliveryKeys(keys: readonly string[], sid?: string): DKey[] {
+  const head = `${PREFIX}d:`;
   return keys
     .filter((k) => k.startsWith(head))
     .map((key) => {
-      const [seq, size] = key.slice(head.length).split(':').map(Number);
-      return { key, seq: seq!, size: size! };
+      const [s, seq, size, who] = key.slice(head.length).split(':');
+      return { key, sid: s ?? '', seq: Number(seq), size: Number(size), user: who === 'u' };
     })
-    .filter((k) => Number.isFinite(k.seq) && Number.isFinite(k.size))
+    .filter((k) => (sid === undefined || k.sid === sid) && Number.isFinite(k.seq) && Number.isFinite(k.size))
     .sort((a, b) => a.seq - b.seq);
+}
+
+function droppedOf(d: Delivery | null, fallbackId: string): Dropped {
+  return d
+    ? { id: d.id, kind: d.origin?.kind ?? 'own', words: excerptOf(d.body) }
+    : { id: ID.test(fallbackId) ? fallbackId : '000000000000', kind: 'unknown', words: '' };
+}
+
+type Evicted = { v: 2; sessions: { [sid: string]: { count: number; named: Dropped[] } } };
+
+function validEvicted(x: unknown): Evicted {
+  const raw = x as Evicted | undefined;
+  const out: Evicted = { v: 2, sessions: {} };
+  if (!raw || typeof raw !== 'object' || !raw.sessions || typeof raw.sessions !== 'object') return out;
+  for (const [sid, e] of Object.entries(raw.sessions)) {
+    if (!e || typeof e !== 'object') continue;
+    out.sessions[sid] = {
+      count: count(e.count),
+      named: Array.isArray(e.named) ? e.named.map(validDropped).filter((d): d is Dropped => d !== null).slice(0, 20) : [],
+    };
+  }
+  return out;
 }
 
 export class Ledger {
@@ -230,27 +285,39 @@ export class Ledger {
     return result;
   }
 
-  private async touch(kv: KV, sid: string): Promise<boolean> {
-    const fresh = (await kv.get(tKey(sid))) === undefined;
+  private async touch(kv: KV, sid: string): Promise<void> {
     await kv.set(tKey(sid), { v: 2, t: Date.now() });
-    return fresh;
   }
 
-  /** Drops the least recently written sessions past LEDGER_MAX_SESSIONS, noting what went with them. */
+  private async index(kv: KV, sid: string): Promise<Index> {
+    return validIndex(await kv.get(sKey(sid)));
+  }
+
+  /**
+   * Drops sessions, least recently written first, while there are more than
+   * LEDGER_MAX_SESSIONS or their pending text passes LEDGER_MAX_STORE_BYTES,
+   * noting what went with each for that session's next receipt.
+   */
   private async evictSessions(kv: KV, keep: string): Promise<void> {
-    const keys = await kv.keys();
-    const sessions = keys.filter((k) => k.startsWith(`${PREFIX}t:`)).map((k) => k.slice(`${PREFIX}t:`.length));
-    if (sessions.length <= LEDGER_MAX_SESSIONS) return;
-    const dated = await Promise.all(
-      sessions.map(async (sid) => ({ sid, t: count((await kv.get(tKey(sid)) as { t?: unknown } | undefined)?.t) })),
-    );
-    dated.sort((a, b) => a.t - b.t);
-    const evicted = ((await kv.get(EVICTED)) ?? { v: 2, sessions: {} }) as { v: 2; sessions: { [sid: string]: number } };
-    if (!evicted.sessions || typeof evicted.sessions !== 'object') evicted.sessions = {};
-    for (const { sid } of dated.slice(0, sessions.length - LEDGER_MAX_SESSIONS)) {
-      if (sid === keep) continue;
+    for (;;) {
+      const keys = await kv.keys();
+      const sessions = keys.filter((k) => k.startsWith(`${PREFIX}t:`)).map((k) => k.slice(`${PREFIX}t:`.length));
+      const total = deliveryKeys(keys).reduce((sum, k) => sum + k.size, 0);
+      if (sessions.length <= LEDGER_MAX_SESSIONS && total <= LEDGER_MAX_STORE_BYTES) return;
+      const dated = await Promise.all(
+        sessions
+          .filter((s) => s !== keep)
+          .map(async (sid) => ({ sid, t: count(((await kv.get(tKey(sid))) as { t?: unknown } | undefined)?.t) })),
+      );
+      if (dated.length === 0) return;
+      dated.sort((a, b) => a.t - b.t);
+      const sid = dated[0]!.sid;
       const pending = deliveryKeys(keys, sid);
-      evicted.sessions[sid] = count(evicted.sessions[sid]) + pending.length;
+      const named: Dropped[] = [];
+      for (const k of pending.slice(0, 20)) named.push(droppedOf(validDelivery(await kv.get(k.key)), ''));
+      const evicted = validEvicted(await kv.get(EVICTED));
+      const prior = evicted.sessions[sid] ?? { count: 0, named: [] };
+      evicted.sessions[sid] = { count: prior.count + pending.length, named: [...prior.named, ...named].slice(0, 20) };
       const names = Object.keys(evicted.sessions);
       for (const old of names.slice(0, Math.max(0, names.length - 32))) delete evicted.sessions[old];
       await kv.set(EVICTED, evicted);
@@ -260,39 +327,46 @@ export class Ledger {
     }
   }
 
-  private async index(kv: KV, sid: string): Promise<Index> {
-    return validIndex(await kv.get(sKey(sid)));
+  /** The receipts this session's record holds: all `prompt.submit` needs to anchor. */
+  receipts(host: KV, session: string): Promise<Ident[]> {
+    const sid = sessionKey(session);
+    return this.run(host, async (kv) => (await this.index(kv, sid)).receipts);
   }
 
-  /** Records one delivery: one small write, then the bounds. */
+  /**
+   * Records one delivery: one small write, then the bounds. Past a bound the
+   * oldest delivery from anyone but the user goes first; the user's own go
+   * only when nothing else is left. Each drop is named for the next receipt.
+   */
   record(host: KV, session: string, delivery: Delivery): Promise<void> {
     const sid = sessionKey(session);
+    const user = speaker(delivery.origin).user;
     return this.run(host, async (kv) => {
       const value = { v: 2, ...delivery };
       const size = bytes(value);
-      if (size > LEDGER_MAX_BYTES) {
-        const index = await this.index(kv, sid);
+      const index = await this.index(kv, sid);
+      let changed = false;
+      const drop = (d: Delivery | null, id: string) => {
         index.dropped++;
-        await kv.set(sKey(sid), index);
-        return;
+        if (index.named.length < MAX_NAMED) index.named.push(droppedOf(d, id));
+        changed = true;
+      };
+      if (size > LEDGER_MAX_BYTES) drop(delivery, delivery.id);
+      else {
+        await kv.set(dKey(sid, delivery.seq, size, user), value);
+        const mine = deliveryKeys(await kv.keys(), sid);
+        let total = mine.reduce((sum, k) => sum + k.size, 0);
+        while (mine.length > LEDGER_MAX_ENTRIES || total > LEDGER_MAX_BYTES) {
+          const at = mine.findIndex((k) => !k.user);
+          const victim = mine.splice(at >= 0 ? at : 0, 1)[0]!;
+          total -= victim.size;
+          drop(validDelivery(await kv.get(victim.key)), '');
+          await kv.remove(victim.key);
+        }
       }
-      await kv.set(dKey(sid, delivery.seq, size), value);
-      const fresh = await this.touch(kv, sid);
-      const mine = deliveryKeys(await kv.keys(), sid);
-      let total = mine.reduce((sum, k) => sum + k.size, 0);
-      let dropped = 0;
-      while (mine.length > LEDGER_MAX_ENTRIES || total > LEDGER_MAX_BYTES) {
-        const oldest = mine.shift()!;
-        total -= oldest.size;
-        await kv.remove(oldest.key);
-        dropped++;
-      }
-      if (dropped) {
-        const index = await this.index(kv, sid);
-        index.dropped += dropped;
-        await kv.set(sKey(sid), index);
-      }
-      if (fresh) await this.evictSessions(kv, sid);
+      if (changed) await kv.set(sKey(sid), index);
+      await this.touch(kv, sid);
+      await this.evictSessions(kv, sid);
     });
   }
 
@@ -302,28 +376,32 @@ export class Ledger {
     return this.run(host, async (kv) => {
       const keys = await kv.keys();
       const index = await this.index(kv, sid);
+      let changed = false;
       const pending: Delivery[] = [];
-      let bad = 0;
       for (const k of deliveryKeys(keys, sid)) {
         const d = validDelivery(await kv.get(k.key));
         if (d && d.seq === k.seq) pending.push(d);
         else {
-          bad++;
+          index.unreadable++;
+          changed = true;
           await kv.remove(k.key);
         }
       }
-      const evicted = (await kv.get(EVICTED)) as { sessions?: { [sid: string]: unknown } } | undefined;
-      let fromEviction = 0;
-      if (evicted?.sessions && typeof evicted.sessions === 'object' && sid in evicted.sessions) {
-        fromEviction = count(evicted.sessions[sid]);
+      for (const k of keys.filter((key) => key.startsWith(OLD_PREFIX))) {
+        await kv.remove(k);
+        index.old++;
+        changed = true;
+      }
+      const evicted = validEvicted(await kv.get(EVICTED));
+      const mine = evicted.sessions[sid];
+      if (mine) {
+        index.dropped += mine.count;
+        index.named = [...index.named, ...mine.named].slice(0, MAX_NAMED);
         delete evicted.sessions[sid];
         await kv.set(EVICTED, evicted);
+        changed = true;
       }
-      if (bad || fromEviction) {
-        index.unreadable += bad;
-        index.dropped += fromEviction;
-        await kv.set(sKey(sid), index);
-      }
+      if (changed) await kv.set(sKey(sid), index);
       return {
         sid,
         pending,
@@ -331,7 +409,9 @@ export class Ledger {
         ours: index.ours,
         receipts: index.receipts,
         dropped: index.dropped,
+        named: index.named,
         unreadable: index.unreadable,
+        old: index.old,
         missing: index.missing,
         durable: this.durable,
       };
@@ -350,8 +430,9 @@ export class Ledger {
         if (!k || !d) continue;
         const value = { v: 2, ...d, anchor };
         const size = bytes(value);
-        await kv.set(dKey(sid, seq, size), value);
-        if (dKey(sid, seq, size) !== k.key) await kv.remove(k.key);
+        const key = dKey(sid, seq, size, k.user);
+        await kv.set(key, value);
+        if (key !== k.key) await kv.remove(k.key);
       }
       const settled = new Set(change.placedSettled);
       index.placed = [...index.placed.filter((p) => !settled.has(p.id)), ...change.placed].slice(-MAX_PLACED);
@@ -363,7 +444,9 @@ export class Ledger {
       );
       if (change.reported) {
         index.dropped = 0;
+        index.named = [];
         index.unreadable = 0;
+        index.old = 0;
         index.missing = 0;
       }
       await kv.set(sKey(sid), index);

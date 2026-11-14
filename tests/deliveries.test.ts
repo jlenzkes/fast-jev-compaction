@@ -48,11 +48,20 @@ describe('deliveries the engine stores beside a message', () => {
     expect(out.filter((m) => m.text.includes('REPORT-ALPHA'))).toHaveLength(0);
   });
 
-  it('puts it back, labelled, when the plain message it sat beside is gone', async () => {
+  it('lists it in the digest when the plain message it sat beside is gone', async () => {
     const t = harness();
     await t.submit(history(), REPORT, 'peer');
     const out = await t.compact(history().slice(0, 8));
-    const put = out.find((m) => m.text.includes('REPORT-ALPHA'))!;
+    const digest = out.find((m) => m.text.startsWith('[fast-jev-compaction digest '))!;
+    expect(digest.text).toMatch(/\n {2}- [0-9a-f]{12} from another Claude session: "REPORT-ALPHA: 41 of 41 rows pass"/);
+    expect(out.filter((m) => m.text.includes('<agent-message'))).toHaveLength(0);
+  });
+
+  it('puts the user\'s own words back whole when their place is gone', async () => {
+    const t = harness();
+    await t.submit(history().slice(0, 6), TYPED, 'composer', { turnId: 'turn' });
+    const out = await t.compact([message('user', 'A new start.', { handle: 'n' })]);
+    const put = holding(out, TYPED)[0]!;
     expect(put.text.split('\n')[0]).toContain('earlier in this conversation');
     expect(put.text.split('\n')[0]).toContain('may also appear elsewhere');
   });

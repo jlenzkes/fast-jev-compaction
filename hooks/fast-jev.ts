@@ -15,8 +15,10 @@ import {
   type Anchor,
   type Delivery,
   fnv1a,
+  digestText,
   goalMessages,
   type Ident,
+  isPlainUser,
   identify,
   insertPlaced,
   newId,
@@ -465,47 +467,61 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('prompt.submit', async ($, event, next) => {
     const seq = nextSeq();
     const midTurn = event.turnId !== undefined;
-    let snapshot: SessionMessage[] | undefined;
-    let record: LedgerRecord | undefined;
-    const session = await sessionIdOf($);
-    try {
-      snapshot = await $.session.messages();
-      record = await ledger.read(storeOf($), session);
-    } catch {
-      // No point to anchor to: the delivery becomes an orphan if it is recorded.
-    }
+    // The user's own Enter between turns makes no host call before it enters.
+    const maybe = midTurn || !speaker(event.origin).user;
+    const before = maybe ? await $.session.messages().catch(() => undefined) : undefined;
     const entered = await next(event);
     const recordIt = entered.drop === undefined && (midTurn || !speaker(entered.origin).user);
+    const log = (outcome: string, listed?: number) =>
+      debugLog($, {
+        ev: 'prompt.submit',
+        registration,
+        origin: originKind(event.origin),
+        accepted: entered.drop !== undefined ? 'dropped' : originKind(entered.origin) ?? 'own',
+        turnId: event.turnId ?? null,
+        wait: event.wait,
+        chars: event.text.length,
+        hash: fnv1a(event.text),
+        attachments: event.attachments?.length ?? 0,
+        listed: listed ?? null,
+        outcome,
+        seq,
+      });
+    if (!recordIt || entered.drop !== undefined) {
+      await log('not recorded');
+      return entered;
+    }
+    const body = [entered.text, ...(entered.context ?? [])].filter((part) => part.length > 0).join('\n');
+    const attachments = event.attachments?.length ?? 0;
+    if (!body && attachments === 0) {
+      await log('empty');
+      return entered;
+    }
+    // Between turns, the host may list the delivery as its own message as it
+    // enters; then it is not stored beside anything and needs no record. This
+    // is the first point the plugin can see that.
+    const after = await $.session.messages().catch(() => undefined);
+    const newest = after?.at(-1);
+    if (!midTurn && after && (!before || after.length > before.length) && isPlainUser(newest) && newest!.text === body) {
+      await log('listed by the host', after.length);
+      return entered;
+    }
+    const snapshot = before ?? after;
+    const session = await sessionIdOf($);
     let anchor: Anchor | undefined;
-    if (recordIt && snapshot) {
+    if (snapshot) {
       // Only the tail is read; the plugin's own receipts there are skipped,
       // since the next compaction takes them out.
       const tail = snapshot.slice(-64);
-      const own = record ? await identify(tail, { pending: [], placed: [], ours: [], receipts: record.receipts }) : new Map();
+      const receipts = await ledger.receipts(storeOf($), session).catch(() => []);
+      const own = await identify(tail, { pending: [], placed: [], ours: [], receipts });
       anchor = anchorOf(tail, new Set([...own].filter(([, o]) => o.kind === 'receipt').map(([i]) => i)));
     }
-    await debugLog($, {
-      ev: 'prompt.submit',
-      registration,
-      origin: originKind(event.origin),
-      accepted: entered.drop !== undefined ? 'dropped' : originKind(entered.origin) ?? 'own',
-      turnId: event.turnId ?? null,
-      wait: event.wait,
-      chars: event.text.length,
-      hash: fnv1a(event.text),
-      attachments: event.attachments?.length ?? 0,
-      listed: snapshot?.length ?? null,
-      recorded: recordIt,
-      seq,
-    });
-    if (!recordIt || entered.drop !== undefined) return entered;
-    const body = [entered.text, ...(entered.context ?? [])].filter((part) => part.length > 0).join('\n');
-    const attachments = event.attachments?.length ?? 0;
-    if (!body && attachments === 0) return entered;
     const delivery: Delivery = { seq, id: newId(), body, midTurn, attachments };
     if (entered.origin) delivery.origin = entered.origin;
     if (anchor) delivery.anchor = anchor;
     await ledger.record(storeOf($), session, delivery);
+    await log('recorded', snapshot?.length);
     return entered;
   });
 
@@ -549,6 +565,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const o = outcomes[n]!;
       return o.kind === 'placed' ? [o.estimate ? { delivery, estimate: o.estimate } : { delivery }] : [];
     });
+    // Orphans from anyone but the user go into one digest, a line each.
+    const digested = pending
+      .filter((_, n) => outcomes[n]!.kind === 'digested')
+      .sort((a, b) => a.seq - b.seq);
+    const transcript = main ? await transcriptPath($) : undefined;
+    const digest = digested.length ? { id: newId(), text: '' } : undefined;
+    if (digest) digest.text = digestText(digest.id, digested, transcript);
     const tally = (kind: Outcome['kind']) => outcomes.filter((o) => o.kind === kind).length;
     await debugLog($, {
       ev: 'session.compact',
@@ -562,6 +585,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       present: tally('listed'),
       keptByHost: tally('kept-by-host'),
       placed: tally('placed'),
+      digested: tally('digested'),
       waiting: tally('waiting'),
       durable: record?.durable ?? null,
       unusable,
@@ -585,7 +609,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // What the listing shows is settled whatever this compaction becomes.
       for (const o of placedOwn) {
         if (o.pending !== undefined) change.retire.push(o.pending);
-        if (o.pending !== undefined || o.placed) change.oursAdded.push({ id: o.id, sha: o.sha, ...(o.user ? { user: true } : {}) });
+        if (o.pending !== undefined || o.placed) {
+          change.oursAdded.push({ id: o.id, sha: o.sha, ...(o.user ? { user: true } : {}), ...(o.digest ? { digest: true } : {}) });
+        }
         if (o.placed) change.placedSettled.push(o.id);
       }
       outcomes.forEach((o, n) => {
@@ -611,7 +637,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
           if (o.kind === 'placed') {
             change.placed.push({ id: d.id, sha: await sha256(o.text), seq: d.seq, ...(speaker(d.origin).user ? { user: true } : {}) });
           }
+          // A digested delivery's text goes; the digest stands for it until a listing shows the digest.
+          if (o.kind === 'digested') change.retire.push(d.seq);
         }
+        if (installed && digest) change.placed.push({ id: digest.id, sha: await sha256(digest.text), seq: digested[0]!.seq, digest: true });
         change.reported = installed && receiptId !== undefined;
       }
       await ledger.commit(storeOf($), session, change);
@@ -621,7 +650,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // and the plugin's receipts out. Nothing is retired for being handed to it:
     // a summary is no evidence that a delivery survived.
     const builtIn = async () => {
-      const handed = restored.length > 0 || removed > 0 ? { ...event, messages: insertPlaced(listed, listed.map((_, i) => i), pending, outcomes) } : event;
+      const handed =
+        restored.length > 0 || digest || removed > 0
+          ? { ...event, messages: insertPlaced(listed, listed.map((_, i) => i), pending, outcomes, digest?.text) }
+          : event;
       const compacted = await next(handed);
       if (compacted.skip === undefined) await settle(false, compacted.messages ?? []).catch(() => undefined);
       return compacted;
@@ -649,7 +681,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         );
         return builtIn();
       }
-      const out = insertPlaced(messages, sourceIndices(listed, messages), pending, outcomes);
+      const out = insertPlaced(messages, sourceIndices(listed, messages), pending, outcomes, digest?.text);
       const whole = messages.filter((m) => m.handle !== undefined).length;
       const counts = {
         listed: listed.length,
@@ -671,11 +703,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
           resultsCut: result.stats.resultsDropped,
           callsDeleted: result.stats.callsDropped + result.stats.stubsDropped,
           restored,
+          ...(digest ? { digest: { id: digest.id, count: digested.length } } : {}),
           dropped: record?.dropped ?? 0,
+          named: record?.named ?? [],
           unreadable: (record?.unreadable ?? 0) + (unusable ? 1 : 0),
+          old: record?.old ?? 0,
           missing: speculative ? 0 : missing,
           durable: record?.durable ?? true,
-          ...(await transcriptPath($).then((t) => (t ? { transcript: t } : {}))),
+          ...(transcript ? { transcript } : {}),
         });
         receiptId = { id, sha: await sha256(text) };
         returned = [...out, { role: 'user', text, toolUses: [] }];
@@ -683,11 +718,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // The reduction the banner states is of the history as returned, against
       // what the session held: the listed messages and the deliveries beside them.
       const before =
-        event.messages.reduce((sum, m) => sum + messageChars(m), 0) + restored.reduce((sum, r) => sum + r.delivery.body.length, 0);
+        event.messages.reduce((sum, m) => sum + messageChars(m), 0) +
+        restored.reduce((sum, r) => sum + r.delivery.body.length, 0) +
+        digested.reduce((sum, d) => sum + d.body.length, 0);
       const after = returned.reduce((sum, m) => sum + messageChars(m), 0);
       const parts = [
         `${counts.rebuilt} rebuilt and ${counts.deleted} deleted, without what the host stores beside them`,
         restored.length > 0 ? `${restored.length} delivered prompt(s) put back` : '',
+        digested.length > 0 ? `${digested.length} earlier one(s) from others listed in a digest` : '',
         removed > 0 ? `${removed} earlier receipt(s) replaced` : '',
       ].filter(Boolean);
       notify(

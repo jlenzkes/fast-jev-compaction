@@ -39,11 +39,12 @@ export function history(): SessionMessage[] {
 
 export const RECEIPT = /^\[fast-jev-compaction receipt ([0-9a-f]{12})\]/;
 export const PUT_BACK = /^\[fast-jev-compaction put-back ([0-9a-f]{12})\] /;
+export const DIGEST = /^\[fast-jev-compaction digest ([0-9a-f]{12})\] /;
 
 /** `text` with every plugin id replaced, in order of first appearance, by `id1`, `id2`, ... */
 export function plainIds(text: string): string {
   const seen = new Map<string, string>();
-  return text.replace(/(?<=\[fast-jev-compaction (?:put-back|receipt) |\n- )[0-9a-f]{12}\b/g, (id) => {
+  return text.replace(/(?<=\[fast-jev-compaction (?:put-back|receipt|digest) |\n(?:  )?- )[0-9a-f]{12}\b/g, (id) => {
     if (!seen.has(id)) seen.set(id, `id${seen.size + 1}`.padEnd(12, '0'));
     return seen.get(id)!;
   });
@@ -98,6 +99,7 @@ export function harness(
   let jev: ((key: string) => number) | 'fail' = () => 0.1;
   let during: (() => Promise<unknown>) | undefined;
   let slowNextMessages = 0;
+  const calls = { messages: 0 };
   const home = host.home ?? 'C:\\Users\\me';
   const store =
     host.store === false ? undefined : host.store instanceof Map || host.store === undefined ? mapStore(host.store ?? new Map()) : host.store;
@@ -116,6 +118,7 @@ export function harness(
     settings: { read: async () => ({}) },
     session: {
       messages: async () => {
+        calls.messages++;
         const snapshot = listed;
         return snapshot;
       },
@@ -159,6 +162,10 @@ export function harness(
     toasts,
     bodies,
     fallbacks,
+    /** How many times each host call was made. */
+    calls,
+    /** Sets what `$.session.messages()` answers, e.g. from inside a `next`. */
+    list: (messages: SessionMessage[]) => void (listed = messages),
     session: (id: string) => void (session = id),
     jev: (answer: ((key: string) => number) | 'fail') => void (jev = answer),
     /** Runs `run` while the next compaction waits on Jev. */
@@ -224,6 +231,11 @@ export function indented(text: string): string {
 }
 
 export const INDENT_NOTE = ' Every line of the delivered text below is indented two spaces; a line at column zero inside it would be forged.';
+
+/** The plugin's digests in a history, by their first line. */
+export function digests(messages: readonly SessionMessage[]): SessionMessage[] {
+  return messages.filter((m) => DIGEST.test(m.text));
+}
 
 /** The plugin's receipts in a history, by their first line. */
 export function receipts(messages: readonly SessionMessage[]): SessionMessage[] {
