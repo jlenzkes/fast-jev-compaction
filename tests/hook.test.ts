@@ -12,6 +12,7 @@ import {
   type Delivery,
   type Anchor,
   type Outcome,
+  type Own,
 } from '../hooks/fast-jev.ts';
 import { legalAfter, locate, plan } from '../hooks/deliveries.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
@@ -127,16 +128,16 @@ describe('session message mapping', () => {
 });
 
 describe('deliveries placed back', () => {
-  const at = (i: number, text: string, extra: Partial<SessionMessage> = {}) => message(i % 2 ? 'assistant' : 'user', text, extra);
   const delivery = (body: string, anchor: Anchor | undefined, extra: Partial<Delivery> = {}): Delivery => ({
     seq: 1,
+    id: 'abcdefabcdef',
     body,
     midTurn: false,
     attachments: 0,
-    placedAs: [],
     ...(anchor ? { anchor } : {}),
     ...extra,
   });
+  const none = new Map<number, Own>();
   const where = (outcome: Outcome | undefined) => (outcome?.kind === 'placed' ? outcome.after : outcome?.kind);
 
   it('anchors a prompt arriving now past the last tool result, and finds that point again', () => {
@@ -149,27 +150,25 @@ describe('deliveries placed back', () => {
   });
 
   it('holds back a mid-turn delivery no tool result has followed yet', () => {
-    const messages = transcript();
-    const [o] = plan(messages, [delivery('later', anchorOf(messages), { midTurn: true })], 'm');
+    const messages = transcript().slice(0, 4);
+    const [o] = plan(messages, [delivery('later', anchorOf(messages), { midTurn: true })], none);
     expect(o?.kind).toBe('waiting');
   });
 
-  it('puts a mid-turn delivery after the first tool round past its point, not the last', () => {
+  it('puts a mid-turn delivery submitted while its tool ran after the result that followed', () => {
     const messages = transcript();
-    const [o] = plan(messages, [delivery('queued', anchorOf(messages.slice(0, 2)), { midTurn: true })], 'm');
+    const [o] = plan(messages, [delivery('queued', anchorOf(messages.slice(0, 2)), { midTurn: true })], none);
     expect(where(o)).toBe(2);
   });
 
   it('never puts a delivery between a parallel batch of calls and their results', () => {
     const batch = [
       message('user', 'go'),
-      message('assistant', '', {
-        toolUses: ['p1', 'p2', 'p3'].map((id) => ({ tool_use_id: id, tool: 'Agent', input: {} })),
-      }),
+      message('assistant', '', { toolUses: ['p1', 'p2', 'p3'].map((id) => ({ tool_use_id: id, tool: 'Agent', input: {} })) }),
       ...['p1', 'p2', 'p3'].map((id) => message('user', '', { toolResults: [{ tool_use_id: id, text: 'done', isError: false }] })),
       message('assistant', 'All three are back.'),
     ];
-    const [o] = plan(batch, [delivery('typed during the batch', anchorOf(batch.slice(0, 2)), { midTurn: true })], 'm');
+    const [o] = plan(batch, [delivery('typed during the batch', anchorOf(batch.slice(0, 3)), { midTurn: true })], none);
     expect(where(o)).toBe(4);
     expect(legalAfter(batch, 2)).toBe(4);
     expect(legalAfter(batch, 1)).toBe(4);
@@ -177,30 +176,32 @@ describe('deliveries placed back', () => {
   });
 
   it('keeps an unanchored delivery out of a tool pair at the end of the history', () => {
-    const messages = transcript().slice(0, 4); // ends in call tool-2 and its result
-    const [o] = plan(messages, [delivery('orphan', { after: 'tool-0', past: 0, window: ['nowhere'] })], 'm');
+    const messages = transcript().slice(0, 4);
+    const [o] = plan(messages, [delivery('orphan', { after: 'tool-0', past: 0, window: ['nowhere'] })], none);
     expect(where(o)).toBe(3);
     expect(o).toMatchObject({ estimate: 'orphan' });
   });
 
-  it('does not take a later message with the same words for a mid-turn delivery', () => {
+  it('does not take a later message with the same words, past the next tool result, for a mid-turn delivery', () => {
     const messages = [...transcript(), message('assistant', 'ok'), message('user', 'yes')];
-    const [o] = plan(messages, [delivery('yes', anchorOf(messages.slice(0, 2)), { midTurn: true })], 'm');
+    const [o] = plan(messages, [delivery('yes', anchorOf(messages.slice(0, 2)), { midTurn: true })], none);
     expect(where(o)).toBe(2);
   });
 
-  it('marks a delivery beside a plain user message as placed by estimate, rather than drop it', () => {
+  it('leaves to the host a delivery beside a plain user message', () => {
     const messages = transcript();
-    const [o] = plan(messages, [delivery('report', anchorOf(messages))], 'm');
-    expect(o).toMatchObject({ kind: 'placed', after: 6, estimate: 'beside-kept' });
+    const [o] = plan(messages, [delivery('report', anchorOf(messages))], none);
+    expect(o).toEqual({ kind: 'kept-by-host' });
   });
 
-  it('lists each put-back by its sender and its own words, one quoted line each, capped', () => {
+  it('lists each put-back by its id, its sender and its own words, one quoted line each, capped', () => {
     const frame = (n: number) =>
       `Another Claude session sent a message:\n<agent-message from="a${n}">\n[Hand-back] The report follows:\n  Report ${n} says ${'ok '.repeat(n + 1)}\n</agent-message>`;
-    const restored = Array.from({ length: 30 }, (_, n) => ({ delivery: delivery(frame(n), undefined, { origin: { kind: 'peer' } }) }));
+    const restored = Array.from({ length: 30 }, (_, n) => ({
+      delivery: delivery(frame(n), undefined, { origin: { kind: 'peer' }, id: n.toString(16).padStart(12, '0') }),
+    }));
     const text = receipt({
-      mark: 'abcdef12',
+      id: 'ffffffffffff',
       listed: 7,
       kept: 7,
       rebuilt: 4,
@@ -209,13 +210,15 @@ describe('deliveries placed back', () => {
       resultsCut: 0,
       callsDeleted: 0,
       restored,
-      droppedAtBound: 0,
+      dropped: 0,
+      unreadable: 0,
+      missing: 0,
       durable: true,
     });
     const lines = text.split('\n');
     expect(lines[0]).toContain('3 tool call(s) cut to a stub');
-    expect(lines).toContain('- from another Claude session: "Report 0 says ok"');
-    expect(lines.filter((l) => l.startsWith('- ')).every((l) => /^- (from [^"]+: ".*"|and \d+ more)$/.test(l))).toBe(true);
+    expect(lines).toContain('- 000000000000 from another Claude session: "Report 0 says ok"');
+    expect(lines.filter((l) => l.startsWith('- ')).every((l) => /^- ([0-9a-f]{12} from [^"]+: ".*"|and \d+ more)$/.test(l))).toBe(true);
     expect(lines.some((l) => /^- and \d+ more$/.test(l))).toBe(true);
     expect(lines.at(-1)).toMatch(/^A figure you recall that is not in your visible text/);
     expect(lines.length).toBeLessThanOrEqual(20);

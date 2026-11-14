@@ -37,15 +37,54 @@ export function history(): SessionMessage[] {
   ];
 }
 
-export const RECEIPT = /^\[fast-jev-compaction receipt ([0-9a-f]{8})\]/;
+export const RECEIPT = /^\[fast-jev-compaction receipt ([0-9a-f]{12})\]/;
+export const PUT_BACK = /^\[fast-jev-compaction put-back ([0-9a-f]{12})\] /;
+
+/** `text` with every plugin id replaced, in order of first appearance, by `id1`, `id2`, ... */
+export function plainIds(text: string): string {
+  const seen = new Map<string, string>();
+  return text.replace(/(?<=\[fast-jev-compaction (?:put-back|receipt) |\n- )[0-9a-f]{12}\b/g, (id) => {
+    if (!seen.has(id)) seen.set(id, `id${seen.size + 1}`.padEnd(12, '0'));
+    return seen.get(id)!;
+  });
+}
 
 export type Harness = ReturnType<typeof harness>;
 
+type Store = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+  delete: (key: string) => Promise<void>;
+  keys: () => Promise<string[]>;
+};
+
+/** A Map as `$.store`, values copied as JSON; `limit` makes a set fail past that many JSON characters in all. */
+export function mapStore(map: Map<string, unknown>, limit = Infinity, written?: { chars: number }): Store {
+  const total = () => [...map.values()].reduce<number>((sum, v) => sum + JSON.stringify(v).length, 0);
+  return {
+    get: async (key) => (map.has(key) ? JSON.parse(JSON.stringify(map.get(key))) : undefined),
+    set: async (key, value) => {
+      const text = JSON.stringify(value);
+      const before = map.has(key) ? JSON.stringify(map.get(key)).length : 0;
+      if (total() - before + text.length > limit) throw new Error('store over its limit');
+      if (written) written.chars += text.length;
+      map.set(key, JSON.parse(text));
+    },
+    delete: async (key) => void map.delete(key),
+    keys: async () => [...map.keys()],
+  };
+}
+
 /**
  * `store`: a Map standing in for `$.store` (share one between two harnesses
- * to model a plugin reload), or `false` for a host whose store is unavailable.
+ * to model a plugin reload), a whole store object, or `false` for a host
+ * whose store is unavailable. `home` is the profile path; `debug` turns the
+ * debug log on and collects what it writes.
  */
-export function harness(options: Record<string, unknown> = {}, host: { store?: Map<string, unknown> | false } = {}) {
+export function harness(
+  options: Record<string, unknown> = {},
+  host: { store?: Map<string, unknown> | Store | false; home?: string; debug?: string[] } = {},
+) {
   const handlers: Record<string, Handler> = {};
   (register as unknown as (on: unknown, options: unknown) => void)(
     (name: string, handler: Handler) => (handlers[name] = handler),
@@ -58,24 +97,46 @@ export function harness(options: Record<string, unknown> = {}, host: { store?: M
   let session = 'sess-1';
   let jev: ((key: string) => number) | 'fail' = () => 0.1;
   let during: (() => Promise<unknown>) | undefined;
-  const map = host.store === undefined ? new Map<string, unknown>() : host.store;
-  const store = map
-    ? {
-        get: async (key: string) => (map.has(key) ? JSON.parse(JSON.stringify(map.get(key))) : undefined),
-        set: async (key: string, value: unknown) => void map.set(key, JSON.parse(JSON.stringify(value))),
-        delete: async (key: string) => void map.delete(key),
-        keys: async () => [...map.keys()],
-      }
-    : undefined;
+  let slowNextMessages = 0;
+  const home = host.home ?? 'C:\\Users\\me';
+  const store =
+    host.store === false ? undefined : host.store instanceof Map || host.store === undefined ? mapStore(host.store ?? new Map()) : host.store;
+  const files = new Map<string, string>();
   const $ = {
-    env: { get: async (name: string) => (name === 'USERPROFILE' ? 'C:\\Users\\me' : undefined) },
+    env: {
+      get: async (name: string) => {
+        // The first host call a hook makes answers late once `slow()` is set.
+        if (slowNextMessages > 0 && name === 'FAST_JEV_DEBUG_LOG') {
+          slowNextMessages--;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return name === 'USERPROFILE' ? home : name === 'FAST_JEV_DEBUG_LOG' && host.debug ? 'debug.jsonl' : undefined;
+      },
+    },
     settings: { read: async () => ({}) },
     session: {
-      messages: async () => listed,
-      id: async () => session,
+      messages: async () => {
+        const snapshot = listed;
+        return snapshot;
+      },
+      id: async () => {
+        if (slowNextMessages > 0) {
+          slowNextMessages--;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return session;
+      },
       cwd: async () => 'c:\\dev\\proj',
     },
-    fs: { exists: async (path: string) => session !== 'no-such-file' && path === `C:/Users/me/.claude/projects/c--dev-proj/${session}.jsonl` },
+    fs: {
+      exists: async (path: string) =>
+        (session !== 'no-such-file' && path === `${home.replace(/\\/g, '/')}/.claude/projects/c--dev-proj/${session}.jsonl`) || files.has(path),
+      read: async (path: string) => files.get(path) ?? '',
+      write: async (path: string, text: string) => {
+        files.set(path, text);
+        if (host.debug) host.debug.splice(0, host.debug.length, ...text.split('\n').filter(Boolean));
+      },
+    },
     ...(store ? { store } : {}),
     http: {
       fetch: async (_url: string, init?: { body?: string }) => {
@@ -102,6 +163,8 @@ export function harness(options: Record<string, unknown> = {}, host: { store?: M
     jev: (answer: ((key: string) => number) | 'fail') => void (jev = answer),
     /** Runs `run` while the next compaction waits on Jev. */
     during: (run: () => Promise<unknown>) => void (during = run),
+    /** Makes the next `$.session.messages()` answer late. */
+    slow: () => void (slowNextMessages = 1),
     /** A prompt entering while the history is `snapshot`; `origin` is a kind or a whole origin. */
     async submit(
       snapshot: SessionMessage[],
@@ -118,9 +181,7 @@ export function harness(options: Record<string, unknown> = {}, host: { store?: M
       };
       const handler =
         handlers['prompt.submit'] ?? (async (_$: unknown, e: unknown, n: (e: unknown) => Promise<unknown>) => n(e));
-      const entered = await handler($, event, (next ?? passThrough) as (e: unknown) => Promise<unknown>);
-      listed = history();
-      return entered;
+      return handler($, event, (next ?? passThrough) as (e: unknown) => Promise<unknown>);
     },
     /** One compaction; the fallback (`next`) answers `builtIn`'s value, a summary by default. */
     async compact(
@@ -141,7 +202,7 @@ export function harness(options: Record<string, unknown> = {}, host: { store?: M
   };
 }
 
-/** The plain user messages holding `words` as a whole line, as written or indented under a put-back header. */
+/** The plain user messages holding `words` as a whole line, as written or indented under a put-back's first line. */
 export function holding(messages: readonly SessionMessage[], words: string): SessionMessage[] {
   return messages.filter(
     (m) => m.role === 'user' && !m.toolResults?.length && m.text.split('\n').some((l) => l === words || l === `  ${words}`),
