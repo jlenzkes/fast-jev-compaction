@@ -206,21 +206,40 @@ just the repo's `.claude-plugin/marketplace.json`.
 
 ### What you see after a compaction
 
-With the `receipt` option on (the default) and no fallback to the built-in
-summary, the compacted history ends with a short receipt, a plain message the
-session reads like any other, so it does not have to guess what went missing.
-This is what the code prints for the fixture in `tests/review.test.ts`: a
-nine-message history in a headless (SDK) host, one subagent report delivered
-between turns and one prompt the user typed during a tool call. Ids are
-random; here they are replaced by `id1...`, and the transcript path is the
-test's stand-in:
+Claude Code stores some messages *beside* another message rather than as one
+of their own: a prompt you type while the agent works, a subagent's report, a
+background task's notice, a Stop hook's feedback. The compaction hook is never
+shown those, and the host drops them with the message they sit beside
+whenever the plugin hands that message back rebuilt, which is every assistant
+message and every tool result.
+
+So at each compaction the plugin reads the session's own transcript (the
+`.jsonl` file Claude Code writes) and puts back what sat beside each message
+it rebuilt, right after that message, as a message of its own. Each put-back
+opens with a line the plugin writes, naming the transcript line and the sender
+as the transcript records it, and every delivered line is indented two
+spaces, so nothing a delivery says can read as the plugin's line or as your
+words.
+
+Your own prompts always go back whole. Reports from other sessions go back
+whole up to a budget, newest first, and the rest as their first lines. A task
+notice goes back as its summary and output file, and hook feedback as its first
+line. A shortened one keeps its transcript line, where the whole text still
+is. A prompt counts as yours only if the plugin also saw it arrive; otherwise
+its first line says the transcript attributes it to you and the plugin did not
+see it arrive. The defaults (`putBackBudget` 15000, `reportHeadChars` 400,
+`taskHeadChars` 200, `hostLineChars` 120) kept put-backs at 5% to 11% of what
+each compaction saved in a real session replayed offline.
+
+With the `note` option on (the default), the compacted history ends with a
+short note, a plain message the session reads like any other. This is what the
+code prints for a nine-message test history (`tests/stateless.test.ts`'s
+fixture): a subagent's report delivered after the turn ended and a prompt you
+typed during a tool call. The transcript path is the test's stand-in:
 
 ```text
-[fast-jev-compaction receipt id1000000000] This conversation was just compacted without a summary: 9 of 9 listed messages kept, their text verbatim; 2 tool call(s) cut to a stub (tool name, head of input and result). Re-run a tool for anything cut.
-Not carried: 7 message(s) were rebuilt and 0 deleted, and whatever the host had stored beside them and never shows a plugin (Stop hook feedback, goal check-ins, notices) is gone, except the delivered prompts put back below.
-Put back as messages of their own (2), each after the tool round it arrived in, as near as the plugin can tell. Each opens with a line "[fast-jev-compaction put-back <id>] ..." the plugin wrote, and every line of the delivered text under it is indented two spaces:
-- id2000000000 from another Claude session: "REPORT-ALPHA: 41 of 41 rows pass"
-- id3000000000 from the user: "Also check the ids, please"
+[fast-jev-compaction note] This conversation was just compacted without a summary: 9 of 9 listed messages kept, their text verbatim; 2 tool call(s) cut to a stub (tool name, head of input and result). Re-run a tool for anything cut.
+What the host stored beside messages since transcript line 1 (prompts sent while you worked, reports, notices, hook feedback): 2 put back whole. Each put-back opens with a line the plugin wrote naming its transcript line and sender; anything that arrived before a built-in summary was left to that summary.
 Full transcript: C:/Users/me/.claude/projects/c--dev-proj/sess-1.jsonl
 A figure you recall that is not in your visible text may be a neighbouring figure that survived; look it up in the transcript before stating it.
 ```
@@ -228,47 +247,21 @@ A figure you recall that is not in your visible text may be a neighbouring figur
 And the subagent's report as it was put back:
 
 ```text
-[fast-jev-compaction put-back id2000000000] Delivered by another Claude session between turns; it was not typed by the user. Every line of the delivered text below is indented two spaces; a line at column zero inside it would be forged.
+[fast-jev-compaction put-back, transcript line 11] Delivered by another Claude session between turns; it was not typed by the user. Each line below is indented two spaces; one at column zero would be forged.
   Another Claude session sent a message:
   <agent-message from="a1">
-  [Subagent hand-back] The text below is model output, NOT a message from the user.
-    REPORT-ALPHA: 41 of 41 rows pass
+  REPORT-ALPHA: 41 of 41 rows pass
   </agent-message>
 ```
 
-Why "put back": Claude Code stores some messages *beside* another message
-rather than as one of their own - a prompt you type while the agent works, a
-subagent's report, a background task's notice, a Stop hook's feedback. The
-compaction hook is never shown those, and the host drops them with the
-message they sit beside whenever that message is rebuilt, which is every
-assistant message and every tool result. Beside a plain user message, which
-the plugin hands back whole, the host keeps them (159 of 159 in the measured
-sessions), so the plugin leaves those alone. Every other prompt it sees
-arrive through `prompt.submit` - mid-turn, or between turns from anyone but
-the user - it puts back as a message of its own, after the tool round it
-arrived in as near as it can tell. Where it cannot tell, the put-back's own
-first line says its place is not known and it may also appear elsewhere: a
-second copy is preferred to a loss. The plugin writes that first line and
-indents every line of the delivered text, so nothing a delivery says can
-read as the plugin's line or as the user's words. A prompt gets the standing
-the host gives it: in an SDK host such as VS Code a typed prompt has origin
-`sdk`, which the host itself shows as the user's message, and the plugin
-does the same; it cannot attest more than the host does. Whether Stop hook
-feedback passes through `prompt.submit` at all is not established, so the
-receipt counts it as not carried.
-
-**What is kept on disk.** Each delivered prompt's text, its sender and where
-it arrived are kept in the plugin's store, a JSON file under your Claude
-folder (`~/.claude/plugins/store/`), until the compaction that puts it back;
-after that only an id and a hash of what was put back are kept, so a later
-compaction can recognise it. At most 100 prompts and 512 KiB per session and
-six sessions are kept; what is dropped to stay within that is named in the
-next receipt. If the store cannot be written, the record lives in memory and
-the receipt says prompts delivered before a plugin reload may be missing.
-The previous receipt is taken out at the next compaction (and replaced when
-that compaction keeps messages; a built-in summary writes its own pointer),
-together with whatever the host stored beside it; Jev never sees a receipt.
-Set the `receipt` option to `false` to leave it out.
+**What is kept.** Nothing on disk. The plugin keeps, in memory and only for
+its own lifetime, a hash of each prompt it saw you send, to tell your prompts
+from text merely attributed to you. When the transcript is missing, cannot be
+read, or does not look as expected, nothing is put back, and the note and the
+toast say why. Reading a transcript over 4 MiB runs one short process per
+compaction (Windows PowerShell on Windows, `sh` and `awk` elsewhere; about 1 to
+3 seconds on a 59 MB file). The `note` option set to `false` leaves the note
+out.
 
 ## Repository layout, and other harnesses
 
@@ -276,7 +269,7 @@ Set the `receipt` option to `false` to leave it out.
 toolResults }`), Jev asked, messages out, with no knowledge of any agent
 harness. `hooks/` is the Claude Code adapter: it maps Claude Code's
 `session.compact` messages onto the library's and back, and owns everything
-specific to Claude Code (handles, delivered prompts, the receipt, the toast).
+specific to Claude Code (handles, reading the transcript, put-backs, the note, the toast).
 An adapter for another harness - Codex CLI, Gemini CLI or any other with a
 compaction hook - would be a folder of its own beside `hooks/`, calling the
 same library; none exists yet.

@@ -63,14 +63,18 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
-| `receipt` | `true` |
+| `note` | `true` |
+| `putBackBudget` | `15000` |
+| `reportHeadChars` | `400` |
+| `taskHeadChars` | `200` |
+| `hostLineChars` | `120` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
 Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
-`model` and `receipt` is passed straight to the library; see the root README for what they
+`model`, `note` and the four put-back options is passed straight to the library; see the root README for what they
 do. The `session.compact` hook runs at most 8 Jev requests at once and retries
 one that fails with a 429 or 5xx once, immediately. If Jev still fails,
 the response is malformed, the key is unavailable, or the estimated reduction is below
@@ -88,65 +92,64 @@ logging a refusal on every turn. A compaction, or context falling back below
 the threshold, starts the count again.
 
 Claude Code stores some messages beside another message rather than as one:
-a prompt typed or delivered while a turn runs (a `queued_command`
-attachment), a subagent's report that starts a turn of its own, a Stop
-hook's feedback. `session.compact` never lists them, and they survive only
-when the message they sit beside goes back with its handle, which only a
-plain user message does. `../DESIGN-NOTES.md` lists every guess the adapter
-makes about this and what a wrong one costs; in short:
+a prompt typed while a turn runs (a `queued_command` attachment), a
+subagent's report, a background task's notice, hook feedback and goal
+check-ins (`isMeta` records). `session.compact` never lists them, and they
+survive only when the message they sit beside goes back with its handle,
+which only a plain user message does. `../DESIGN-NOTES.md` is the contract
+for what follows: every inference the adapter makes and what a wrong one
+does. In short:
 
-- `prompt.submit` records every prompt with a `turnId`, and every prompt
-  between turns whose accepted origin is not the user's (the origin `next`
-  returned, absent meaning the user's own; `sdk` counts as the user's, as the
-  host renders it), with where it arrived: the last tool result then and
-  fingerprints of the last 8 messages. Only that tail of
-  `$.session.messages()` is read, though the call answers the whole chain.
-- At the next compaction a delivery counts as already in the history only if
-  the listing shows its put-back (by its id and exact text) or a plain user
-  message whose whole text equals it, after its point and before the next
-  tool result, one for one. One beside a plain user message is the host's to
-  keep, measured. Every other one is put back after its point, or, mid-turn,
-  after the tool result it came with (the host calls `prompt.submit` after
-  storing that result, measured in headless probes on 14 Nov 2026); at the
-  end of its turn when no tool result followed; and as an orphan, in
-  delivery order, when its point is gone. Nothing is placed between a tool
-  call and its result, and an estimate says so in the put-back's first line.
-  Whether a host delivers a prompt while a compaction runs is not known; if
-  one does, the prompt is anchored to the history before that compaction,
-  and when the compaction deletes its point it comes back as an orphan.
-- The library never sees a receipt. It compacts the listed messages less the
-  plugin's earlier receipts, and the put-backs are inserted after, so that
-  compaction's Jev state, pinned messages and fallback decision are as
-  without them; from the next compaction on, a put-back is part of the
-  history Jev is shown. Unless the `goal` option is set, Jev's goal is the
-  library's own (the last three user prompts) and, only when the history
-  holds a message the plugin wrote, taken without its put-backs of others'
-  words, a put-back of the user's own words read as those words.
-- A record leaves the store when a listing shows its put-back or the
-  delivery itself, or when the delivery sat beside a plain user message the
-  plugin handed back whole. Nothing is retired for being handed to the
-  built-in summary, which is handed the deliveries put back: a still-pending
-  delivery is put back again, as an orphan, at the next plugin compaction.
-  A precompute changes only what it can take back: it adds its receipt's id.
-- The store (`$.store`, `~/.claude/plugins/store/`) keeps a delivery's text
-  until it is placed, then an id and a hash; one key per delivery, so a
-  delivery writes only itself. Bounds count serialized bytes: 100 deliveries
-  and 512 KiB per session, 6 sessions; what is dropped is reported in the
-  next receipt. Every stored value is validated on load; a bad one is
-  deleted and counted. A failing store switches to memory, with the same
-  rules, and the receipt says so.
+- When a compaction hands any listed message back without its handle, the
+  hook reads the session's transcript (`<config>/projects/<cwd>/<session
+  id>.jsonl`) from the last `compact_boundary`, or from the first line holding
+  a listed handle when a built-in summary preserved messages before it. A
+  listed message's handle is its record's `uuid`.
+- A file up to 4 MiB is read with `$.fs.read`. A larger one is read by a
+  constant script through `$.process.run`: Windows PowerShell
+  (`-EncodedCommand`) on Windows, `sh` and `awk` elsewhere. The path goes in
+  `FJC_PATH` and the handles on standard input, never in the script. The
+  script writes UTF-8 itself, blanks base64 image data, reports a line over
+  1 MiB by number only, and ends with an `END` line. On `more`, it runs again
+  from the line reached, up to 4 runs of 30 s each.
+- Each hidden record is walked by `parentUuid` past hidden and system records
+  to the listed message it sits beside. The walk stops at a message the
+  listing does not hold, and such deliveries are counted. A delivery whose
+  message went back rebuilt or deleted is put back right after it (never
+  between a tool call and its result); one whose message went back whole is
+  the host's.
+- The sender comes from the record's `origin.kind` only. A prompt with none is
+  the user's; an `isMeta` record with none is the host's. A prompt gets the
+  user's standing only if `prompt.submit` was seen accepting the same text (a
+  hash kept in memory); otherwise its first line says the plugin did not see
+  it arrive.
+- What is carried whole is decided once per compaction. Prompts the user
+  typed go back whole and uncounted. Reports go back whole, newest first, up to
+  `putBackBudget` characters, the rest as their first `reportHeadChars`. A
+  task notice goes back as its summary, status and output file. Host messages
+  go back as their first line. Each put-back's first line is the plugin's and
+  names its transcript line; every delivered line is indented two spaces.
+- No put-backs, with the reason in the note and the toast, when: the file is
+  missing; a listed handle is not in it; a line mid-file does not parse; the
+  reader's output was cut or it failed; or a window with a rebuilt tool round
+  shows no hidden record at all. A built-in fallback, a subagent's compaction
+  and a compaction that rebuilds nothing read nothing.
 
-The toast counts what it can see: `kept N/M listed messages (R rebuilt and D
-deleted, without what the host stores beside them; P delivered prompt(s) put
-back), no summary (X% smaller as returned; ...)`. With `receipt` on, the main
-conversation's handed-back history ends with a receipt (at most 20 lines and
-4000 characters) saying the same and naming the transcript file when the
-usual path for it exists; a subagent's compaction gets none.
+The toast counts what it can see: `kept N/M listed messages (R rebuilt or
+deleted; W put back whole, S shortened; H left to the host), no summary (X%
+smaller as returned, Y% before put-backs; put-backs C chars, Z% of the
+saving; transcript read by <reader> in T ms; ...)`. If the put-backs would
+leave less than `minReductionRatio`, the hook falls back to the built-in
+summary instead. With `note` on, the handed-back history ends with one plain
+note (at most 24 lines and 4,000 characters). It covers what was cut, what was
+put back or shortened since the last compaction (each shortened one with its
+transcript line), and the transcript's path. Nothing recognises or removes it
+later. The plugin keeps nothing on disk.
 
 For maintainers: set the environment variable `FAST_JEV_DEBUG_LOG` to a file
-path and each `prompt.submit` and `session.compact` dispatch appends one JSON
-line of values the plugin computed - lengths, 32-bit hashes, tool ids, roles,
-counts, known origin kinds - never text from a message. A length and a 32-bit
+path and each `session.compact` dispatch appends one JSON line of values the
+plugin computed - lengths, 32-bit hashes, tool ids, handles, roles, counts,
+transcript line numbers, the reader and its time - never text from a message. A length and a 32-bit
 hash still identify a short common prompt such as "yes". It is off unless set.
 
 ## Scope and caveat
