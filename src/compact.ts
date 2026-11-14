@@ -288,7 +288,13 @@ export function applyDecisions(
   return kept;
 }
 
-/** Characters of text, tool input and tool output a message holds. */
+/** A result's characters without a stub note, so a stub never counts as larger than what it replaced. */
+function resultChars(text: string): number {
+  if (!text.endsWith(STUB_NOTE)) return text.length;
+  return Math.max(0, text.length - STUB_NOTE.length - 1);
+}
+
+/** Characters of text, tool input and tool output a message holds; a stub note is not counted. */
 export function messageChars(message: Message): number {
   let total = message.text.length;
   for (const tool of message.toolUses) {
@@ -298,7 +304,7 @@ export function messageChars(message: Message): number {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) total += result.text.length;
+  for (const result of message.toolResults ?? []) total += resultChars(result.text);
   return total;
 }
 

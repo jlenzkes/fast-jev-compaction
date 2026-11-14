@@ -500,6 +500,17 @@ describe('compact', () => {
     expect(second.messages.map((m) => m.text)).toEqual(['go', 'done']);
   });
 
+  it('never counts a stub as larger than the result it replaced', async () => {
+    const messages: Message[] = [message('user', 'go')];
+    for (let i = 0; i < 300; i += 1) messages.push(call(`s${i}`, 'Bash', { command: 'true' }, 'ok'), result(`s${i}`, 'ok'));
+    messages.push(message('assistant', 'done'));
+    const output = await compact(messages, fakeJev(() => 0.1), { dropCalls: false });
+    expect(output.stats.callsStubbed).toBe(output.stats.calls - output.stats.pinned);
+    expect(output.messages[1]!.toolUses[0]!.text).toMatch(/\[fast-jev-compaction stub\]$/);
+    // Nothing was cut, so nothing was gained, and nothing was lost either.
+    expect(reductionRatio(output)).toBe(0);
+  });
+
   it('rejects malformed answers', async () => {
     const broken: JevAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),
