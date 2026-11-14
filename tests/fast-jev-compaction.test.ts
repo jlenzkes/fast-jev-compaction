@@ -447,6 +447,59 @@ describe('compact', () => {
     expect(reductionRatio(output)).toBe(0);
   });
 
+  /** `count` Bash calls with 1000-character results, ids `u<from>` onward. */
+  function bashCalls(count: number, from = 0): Message[] {
+    const messages: Message[] = [];
+    for (let i = from; i < from + count; i += 1) {
+      const out = `line ${i} `.repeat(200).slice(0, 1000);
+      messages.push(
+        call(`u${i}`, 'Bash', { command: `cd /repo/packages/pkg-${i} && npm run check -- --verbose`, description: `Check package ${i}` }, out),
+        result(`u${i}`, out),
+      );
+    }
+    return messages;
+  }
+
+  it('compacts a history with more calls than the state can describe', async () => {
+    const messages = [message('user', 'Run the build checks across every package.'), ...bashCalls(900), message('assistant', 'All checks ran.')];
+    const output = await compact(messages, fakeJev(() => 0.1));
+    expect(output.stats.stateTokens).toBeLessThanOrEqual(25_000);
+    expect(output.stats.stateStage).toMatch(/^\d+ older calls omitted$/);
+    expect(reductionRatio(output)).toBeGreaterThanOrEqual(0.25);
+  });
+
+  it('keeps compacting as stubs and new calls accumulate across passes', async () => {
+    const options = { dropCalls: false };
+    const start = [message('user', 'Run the build checks across every package.'), ...bashCalls(500)];
+    const first = await compact([...start, message('assistant', 'Half done.')], fakeJev(() => 0.1), options);
+    expect(first.stats.callsStubbed).toBeGreaterThan(400);
+    const stubbedIds = new Set(
+      first.messages.flatMap((m) => m.toolUses).filter((t) => /truncated \d+ chars of this tool result/.test(t.text ?? '')).map((t) => t.tool_use_id),
+    );
+    expect(stubbedIds.size).toBe(first.stats.callsStubbed);
+
+    const grown = [...first.messages, ...bashCalls(300, 500), message('assistant', 'All checks ran.')];
+    const second = await compact(grown, fakeJev(() => 0.1), options);
+    expect(second.stats.stubsDropped).toBe(first.stats.callsStubbed);
+    const left = new Set(second.messages.flatMap((m) => m.toolUses).map((t) => t.tool_use_id));
+    expect([...stubbedIds].filter((id) => left.has(id))).toEqual([]);
+  });
+
+  it('marks a stub of a short result, so the next pass deletes it', async () => {
+    const options = { preserveRecentMessages: 1, dropCalls: false };
+    const short: Message[] = [
+      message('user', 'go'),
+      call('s1', 'Read', { file_path: 'b.ts' }, 'ok'),
+      result('s1', 'ok'),
+      message('assistant', 'done'),
+    ];
+    const first = await compact(short, fakeJev(() => 0.1), options);
+    expect(first.decisions.map((d) => d.reason)).toEqual(['call_stubbed']);
+    const second = await compact(first.messages, fakeJev(() => 0.1), options);
+    expect(second.decisions.map((d) => d.reason)).toEqual(['stub_dropped']);
+    expect(second.messages.map((m) => m.text)).toEqual(['go', 'done']);
+  });
+
   it('rejects malformed answers', async () => {
     const broken: JevAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),
