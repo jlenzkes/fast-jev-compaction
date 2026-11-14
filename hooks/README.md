@@ -21,7 +21,9 @@ The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),
 then old messages collapse to a `[… N chars omitted …]` note, then old tool
 calls shrink to one line each, then old call-less messages are left out and
-runs of old call-only messages fold together. Questions are split into as many requests as
+runs of old call-only messages fold together. If it still does not fit, the
+calls are asked in contiguous windows, halved until each window's state fits;
+a call whose window cannot fit alone is not asked and stays. Questions are split into as many requests as
 needed so each request (state plus questions) stays under `maxRequestTokens`;
 the full state is resent with every request. Token counts are estimated
 without a tokenizer, calibrated to land a little above what Jev reports.

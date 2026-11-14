@@ -147,7 +147,10 @@ async function askBatch(
   );
 }
 
-const RESULT_NOTE = /\[fast-jev-compaction truncated \d+ chars of this tool result/;
+const RESULT_NOTE = /\[fast-jev-compaction (?:truncated \d+ chars of this tool result|stub\])/;
+
+/** Appended to a stubbed result too short to truncate, so `alreadyStubbed` knows it. */
+const STUB_NOTE = '[fast-jev-compaction stub]';
 
 /**
  * The ids of calls an earlier compaction already cut: the result carries this
@@ -177,8 +180,10 @@ export function alreadyStubbed(
   return ids;
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
+function truncatedResultText(text: string, isError: boolean, headChars: number, stub = false): string {
+  if (text.length <= headChars + 120) {
+    return stub && !RESULT_NOTE.test(text) ? `${text}${text ? '\n' : ''}${STUB_NOTE}` : text;
+  }
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
   return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
@@ -231,6 +236,7 @@ export function applyDecisions(
           tool.text ?? '',
           tool.isError ?? false,
           headChars,
+          action === 'stub_call' && tool.text !== undefined,
         );
         const input = action === 'stub_call' ? truncatedInput(tool.input, headChars) : tool.input;
         if ((tool.text ?? '') === text && input === tool.input) return tool;
@@ -248,7 +254,7 @@ export function applyDecisions(
       .map((result) => {
         const action = actions.get(result.tool_use_id);
         if (action !== 'drop_result' && action !== 'stub_call') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const text = truncatedResultText(result.text, result.isError ?? false, headChars, action === 'stub_call');
         return text === result.text
           ? result
           : {

@@ -588,4 +588,24 @@ describe('windowed states when the history does not fit', () => {
     expect(out.decisions.every((d) => d.action === 'keep')).toBe(true);
     expect(out.messages).toEqual(messages);
   });
+
+  it('keeps the calls of a window too large to fit alone, and asks about the rest', async () => {
+    const messages = long(20);
+    // A tool name is never shortened, so this call's window cannot fit by itself.
+    const huge = 'Z'.repeat(6_000);
+    messages[3 * 7 + 2]!.toolUses[0]!.tool = huge;
+    const calls = collectToolCalls(messages, 2);
+    const big = calls.find((c) => c.tool === huge)!;
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), { ...options, maxStateTokens: 800, dropCalls: false });
+    expect(out.stats.stateStage).toMatch(/^windows:\d+ unasked:1$/);
+    expect(out.stats.stateTokens).toBeLessThanOrEqual(800);
+    const asked = new Set(seen.flatMap((s) => s.questions));
+    expect(asked.has(`call_${big.id}`)).toBe(false);
+    expect(out.decisions.find((d) => d.id === big.id)).toMatchObject({ action: 'keep', reason: 'kept' });
+    expect(out.messages.some((m) => m.toolUses.some((t) => t.tool === huge && t.text === ''))).toBe(true);
+    const others = out.decisions.filter((d) => d.id !== big.id && d.reason !== 'pinned');
+    expect(others.length).toBe(calls.filter((c) => !c.pinned).length - 1);
+    expect(others.every((d) => asked.has(`call_${d.id}`) && d.action === 'stub_call')).toBe(true);
+  });
 });
