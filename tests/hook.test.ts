@@ -214,7 +214,7 @@ describe('deliveries placed back', () => {
     });
     const lines = text.split('\n');
     expect(lines[0]).toContain('3 tool call(s) cut to a stub');
-    expect(lines).toContain('- from another Claude session: "...0 says ok"');
+    expect(lines).toContain('- from another Claude session: "Report 0 says ok"');
     expect(lines.filter((l) => l.startsWith('- ')).every((l) => /^- (from [^"]+: ".*"|and \d+ more)$/.test(l))).toBe(true);
     expect(lines.some((l) => /^- and \d+ more$/.test(l))).toBe(true);
     expect(lines.at(-1)).toMatch(/^A figure you recall that is not in your visible text/);

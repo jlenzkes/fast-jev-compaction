@@ -18,6 +18,7 @@ import {
   insertPlaced,
   newMark,
   type Outcome,
+  operatorGoal,
   ownsIdleTurn,
   plan,
   receipt,
@@ -357,15 +358,38 @@ export const LEDGER_MAX_CHARS = 512 * 1024;
 export const LEDGER_MAX_SESSIONS = 6;
 const LEDGER_PREFIX = 'deliveries:';
 
-type LedgerHost = {
+/**
+ * What the record needs of the host, as closures. The host's module checker
+ * requires `$` to be spelled `$.noun.event(...)` where it is used, so `$`
+ * itself is never handed to the record; `ledgerHost` builds these at the
+ * hook. A host without `$.store` makes them reject, and the record then lives
+ * in memory.
+ */
+export type LedgerHost = {
+  sessionId: () => Promise<string>;
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+  remove: (key: string) => Promise<void>;
+  keys: () => Promise<string[]>;
+};
+
+function ledgerHost($: {
   session: { id: () => Promise<string> };
-  store?: {
+  store: {
     get: (key: string) => Promise<unknown>;
     set: (key: string, value: unknown) => Promise<void>;
     delete: (key: string) => Promise<void>;
     keys: () => Promise<string[]>;
   };
-};
+}): LedgerHost {
+  return {
+    sessionId: async () => $.session.id(),
+    get: async (key) => $.store.get(key),
+    set: async (key, value) => $.store.set(key, value),
+    remove: async (key) => $.store.delete(key),
+    keys: async () => $.store.keys(),
+  };
+}
 
 function isLedger(value: unknown): value is LedgerData {
   const v = value as LedgerData | undefined;
@@ -394,67 +418,61 @@ export class Ledgers {
     return result;
   }
 
-  private async sid($: LedgerHost): Promise<string> {
+  private async sid(host: LedgerHost): Promise<string> {
     try {
-      return await $.session.id();
+      return await host.sessionId();
     } catch {
       return '';
     }
   }
 
-  private async load($: LedgerHost, sid: string): Promise<LedgerData> {
+  private async load(host: LedgerHost, sid: string): Promise<LedgerData> {
     const cached = this.memory.get(sid);
     if (cached) return cached;
     let data: LedgerData = { entries: [], receipts: [], dropped: 0 };
-    if (!$.store) this.durable = false;
-    else {
-      try {
-        const stored = await $.store.get(LEDGER_PREFIX + sid);
-        if (isLedger(stored)) data = stored;
-      } catch {
-        this.durable = false;
-      }
+    try {
+      const stored = await host.get(LEDGER_PREFIX + sid);
+      if (isLedger(stored)) data = stored;
+    } catch {
+      this.durable = false;
     }
     this.memory.set(sid, data);
     return data;
   }
 
-  private async save($: LedgerHost, sid: string, data: LedgerData): Promise<void> {
+  private async save(host: LedgerHost, sid: string, data: LedgerData): Promise<void> {
     let chars = data.entries.reduce((sum, d) => sum + d.body.length, 0);
     while (data.entries.length > LEDGER_MAX_ENTRIES || chars > LEDGER_MAX_CHARS) {
       chars -= data.entries.shift()!.body.length;
       data.dropped++;
     }
-    if (!$.store) {
-      this.durable = false;
-      return;
-    }
+    if (!this.durable) return;
     try {
       // Deleted then set, so the store's key order is the order last written.
-      await $.store.delete(LEDGER_PREFIX + sid);
-      await $.store.set(LEDGER_PREFIX + sid, data);
-      const ours = (await $.store.keys()).filter((key) => key.startsWith(LEDGER_PREFIX));
-      for (const key of ours.slice(0, Math.max(0, ours.length - LEDGER_MAX_SESSIONS))) await $.store.delete(key);
+      await host.remove(LEDGER_PREFIX + sid);
+      await host.set(LEDGER_PREFIX + sid, data);
+      const ours = (await host.keys()).filter((key) => key.startsWith(LEDGER_PREFIX));
+      for (const key of ours.slice(0, Math.max(0, ours.length - LEDGER_MAX_SESSIONS))) await host.remove(key);
     } catch {
       this.durable = false;
     }
   }
 
   /** Applies `change` to this session's record and keeps it. */
-  update($: LedgerHost, change: (data: LedgerData) => void): Promise<void> {
+  update(host: LedgerHost, change: (data: LedgerData) => void): Promise<void> {
     return this.serial(async () => {
-      const sid = await this.sid($);
-      const data = await this.load($, sid);
+      const sid = await this.sid(host);
+      const data = await this.load(host, sid);
       change(data);
-      await this.save($, sid, data);
+      await this.save(host, sid, data);
     });
   }
 
   /** A copy of this session's record, as a compaction starts. */
-  read($: LedgerHost): Promise<LedgerView> {
+  read(host: LedgerHost): Promise<LedgerView> {
     return this.serial(async () => {
-      const sid = await this.sid($);
-      const data = await this.load($, sid);
+      const sid = await this.sid(host);
+      const data = await this.load(host, sid);
       return { ...structuredCopy(data), sid, durable: this.durable };
     });
   }
@@ -468,14 +486,14 @@ export class Ledgers {
    * it put back; the host keeps its result for a compaction that may come.
    */
   settle(
-    $: LedgerHost,
+    host: LedgerHost,
     entries: readonly Delivery[],
     outcomes: readonly Outcome[],
     mode: 'installed' | 'speculative' | 'summarized',
     returned: readonly SessionMessage[],
     record?: ReceiptRecord,
   ): Promise<void> {
-    return this.update($, (data) => {
+    return this.update(host, (data) => {
       const anchor: Anchor = anchorOf(returned);
       const retire = new Set<number>();
       entries.forEach((entry, n) => {
@@ -511,7 +529,7 @@ export type { Anchor, Delivery, Outcome, ReceiptRecord } from './deliveries.js';
  * and the session and agent ids. It settles when and how the host dispatches
  * these hooks. The file is cut back to its newest half past 1 MiB.
  */
-const DEBUG_LOG_ENV = 'FAST_JEV_DEBUG_LOG';
+// The host reads env names off the source, so each call spells 'FAST_JEV_DEBUG_LOG'.
 const DEBUG_LOG_MAX_CHARS = 1024 * 1024;
 
 type DebugHost = {
@@ -527,7 +545,7 @@ let debugQueue: Promise<unknown> = Promise.resolve();
 function debugLog($: DebugHost, line: Record<string, unknown>): Promise<void> {
   const run = async () => {
     try {
-      const path = await $.env.get(DEBUG_LOG_ENV);
+      const path = await $.env.get('FAST_JEV_DEBUG_LOG');
       if (!path) return;
       let text = (await $.fs.exists(path)) ? await $.fs.read(path) : '';
       if (text.length > DEBUG_LOG_MAX_CHARS) text = text.slice(text.length - DEBUG_LOG_MAX_CHARS / 2).replace(/^[^\n]*\n/, '');
@@ -578,7 +596,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Every prompt submitted while a turn runs is queued beside a message,
     // whether or not it asked to wait its turn (`wait` is a hint for hooks).
     const midTurn = event.turnId !== undefined;
-    const debug = (await $.env.get(DEBUG_LOG_ENV).catch(() => undefined)) !== undefined;
+    const debug = (await $.env.get('FAST_JEV_DEBUG_LOG').catch(() => undefined)) !== undefined;
     const given = {
       ev: 'prompt.submit',
       registration,
@@ -621,7 +639,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const delivery: Delivery = { seq, body, midTurn, attachments, placedAs: [] };
     if (origin) delivery.origin = origin;
     if (anchor) delivery.anchor = anchor;
-    await ledgers.update($, (ledger) => {
+    await ledgers.update(ledgerHost($), (ledger) => {
       ledger.entries.push(delivery);
       ledger.entries.sort((a, b) => a.seq - b.seq);
     });
@@ -635,7 +653,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // A precompute installs nothing (its result is kept for a compaction that
     // may never come), so it may not retire or move a pending delivery.
     const mode = event.trigger === 'precompute' ? 'speculative' : 'installed';
-    const ledger = main ? await ledgers.read($) : undefined;
+    const ledger = main ? await ledgers.read(ledgerHost($)) : undefined;
     const mark = newMark();
     const { messages: listed, removed } = ledger
       ? withoutReceipts(event.messages, ledger.receipts)
@@ -674,12 +692,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
           : event;
       const compacted = await next(handed);
       if (ledger && !compacted.skip) {
-        await ledgers.settle($, entries, outcomes, mode === 'speculative' ? mode : 'summarized', compacted.messages ?? []);
+        await ledgers.settle(ledgerHost($), entries, outcomes, mode === 'speculative' ? mode : 'summarized', compacted.messages ?? []);
       }
       return compacted;
     };
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
+      // Jev's goal is what the user wrote, never a delivery put back as a plain
+      // message or a host notice; a configured goal still wins.
+      if (!config.goal) config.goal = operatorGoal(listed) || 'No prompt from the user is in this history.';
       // The library sees what the host listed, less this plugin's own receipts:
       // put-back deliveries are inserted afterwards, so neither they nor a
       // receipt change Jev's state, its goal, the pinned messages or the
@@ -740,7 +761,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
           before === 0 ? 0 : (before - after) / before,
         )} smaller as returned; ${summarize(result).replace(/^-?\d+% reduction; /, '')})`,
       );
-      if (ledger) await ledgers.settle($, entries, outcomes, mode, out, record);
+      if (ledger) await ledgers.settle(ledgerHost($), entries, outcomes, mode, out, record);
       return { messages: returned };
     } catch (error) {
       notify(

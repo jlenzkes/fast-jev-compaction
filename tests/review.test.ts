@@ -189,6 +189,18 @@ describe('finding 5: anchors keep chronology and retire what is gone', () => {
   });
 });
 
+describe('probe: the host submits a queued prompt after the tool result it sits beside', () => {
+  it('puts back a mid-turn delivery submitted after its tool result right after that result', async () => {
+    // Measured 14 Nov 2026 with FAST_JEV_DEBUG_LOG in a headless session: a
+    // prompt queued during a tool call reached prompt.submit when the call's
+    // result was already the newest listed message.
+    const t = harness({ receipt: false });
+    await t.submit(history().slice(0, 7), 'DEQUEUED-AFTER-RESULT', 'task-notification', { turnId: 'turn' });
+    const out = await t.compact();
+    expect(out[indexHolding(out, 'DEQUEUED-AFTER-RESULT') - 1]!.toolResults?.[0]?.tool_use_id).toBe('t2');
+  });
+});
+
 describe('finding 6: a precompute consumes nothing', () => {
   it('still puts a report back after a discarded precompute', async () => {
     const t = harness({ receipt: false });
@@ -233,15 +245,17 @@ describe('finding 7: the built-in fallback is handed the deliveries', () => {
     expect(holding(await t.compact(), 'SKIPPED-REPORT')).toHaveLength(1);
   });
 
-  it('re-anchors a waiting prompt to the summary, so it waits for a new tool result', async () => {
+  it('re-anchors a waiting prompt to the summary, then ends it with its turn rather than after a later tool', async () => {
     const t = harness({ receipt: false });
     await t.submit(history(), 'WAITING-FALLBACK', 'composer', { turnId: 'turn' });
     t.jev('fail');
     const summary = [message('user', 'BUILT-IN SUMMARY', { handle: 's' })];
     await t.compact(history(), {}, async () => ({ messages: summary }));
     t.jev(() => 0.1);
-    const noResults = [...summary, message('assistant', 'after summary', { handle: 'x' }), message('user', 'newest', { handle: 'y' })];
-    expect(holding(await t.compact(noResults), 'WAITING-FALLBACK')).toHaveLength(0);
+    const later = [...summary, message('assistant', 'after summary', { handle: 'x' }), message('user', 'newest', { handle: 'y' }), call('t9'), result('t9')];
+    const out = await t.compact(later);
+    expect(holding(out, 'WAITING-FALLBACK')).toHaveLength(1);
+    expect(indexHolding(out, 'WAITING-FALLBACK')).toBe(out.findIndex((m) => m.text === 'newest') - 1);
   });
 });
 
@@ -360,5 +374,76 @@ describe('finding 11: the whole returned history goes round again', () => {
     const second = await t.compact(first);
     expect(plainUsers(second).filter((m) => m.text.includes('REPORT-ALPHA'))).toHaveLength(1);
     expect(receipts(second)).toHaveLength(1);
+  });
+});
+
+// The third review (findings by its own numbers) that the other two did not raise.
+describe('third review', () => {
+  it('5: quotes the user\'s words whole, though two prompts share their first words', async () => {
+    const t = harness();
+    await t.submit(history().slice(0, 6), 'Please check the ids', 'composer', { turnId: 'turn' });
+    await t.submit(history().slice(0, 6), 'Please check the names', 'composer', { turnId: 'turn' });
+    const text = (await t.compact()).at(-1)!.text;
+    expect(text).toContain('- from the user: "Please check the ids"');
+    expect(text).toContain('- from the user: "Please check the names"');
+  });
+
+  it("6: scores Jev against what the user wrote, never a put-back's or a host notice's text", async () => {
+    const t = harness();
+    await t.submit(history().slice(0, 4), 'REPORT-IN-GOAL? 41 of 41 rows pass', 'peer');
+    const first = await t.compact();
+    const withNotice = [...first.slice(0, -1), message('user', '<task-notification>NOTICE-IN-GOAL?</task-notification>', { handle: 'n' }), first.at(-1)!];
+    await t.compact(withNotice);
+    const goal = (JSON.parse(t.bodies.at(-1)!) as { state: { goal: string } }).state.goal;
+    expect(goal).toContain('Start the two subagents and wait for their reports.');
+    expect(goal).not.toContain('REPORT-IN-GOAL?');
+    expect(goal).not.toContain('NOTICE-IN-GOAL?');
+    expect(goal).not.toContain('fast-jev-compaction');
+  });
+
+  it('13: on the windows path Jev is asked exactly what it is asked without the delivery', async () => {
+    const long = [message('user', 'Fix the build', { handle: 'start' })];
+    for (let i = 0; i < 60; i++) long.push(message('assistant', `step ${i}`, { handle: `s${i}` }), call(`w${i}`), result(`w${i}`));
+    long.push(message('assistant', 'waiting now', { handle: 'last-a' }), message('user', 'go on', { handle: 'last-u' }));
+    const options = { maxStateTokens: 600, maxRequestTokens: 6000, receipt: false };
+    const plain = harness(options);
+    await plain.compact(long);
+    const t = harness(options);
+    await t.submit(long.slice(0, 40), 'WINDOW-REPORT', 'peer');
+    const out = await t.compact(long);
+    expect(t.toasts.at(-1)).toMatch(/windows:[1-9]/);
+    expect(holding(out, 'WINDOW-REPORT')).toHaveLength(1);
+    expect(t.bodies).toEqual(plain.bodies);
+  });
+
+  it('15: bounds the record while no compaction runs', async () => {
+    const store = new Map<string, unknown>();
+    const t = harness({}, { store });
+    for (let i = 0; i < 105; i++) await t.submit(history().slice(0, 4), `GROWTH-${i}`, 'peer');
+    const record = store.get('deliveries:sess-1') as { entries: unknown[]; dropped: number };
+    expect(record.entries).toHaveLength(100);
+    expect(record.dropped).toBe(5);
+  });
+
+  it('22: ends a mid-turn prompt with its turn when no tool result followed, not after a later turn\'s tool', async () => {
+    const t = harness({ receipt: false });
+    const listed = [
+      ...history().slice(0, 4),
+      message('user', 'A new question.', { handle: 'q' }),
+      call('t5'),
+      result('t5'),
+      message('assistant', 'Answered.', { handle: 'z' }),
+    ];
+    await t.submit(history().slice(0, 4), 'LATE-IN-TURN', 'composer', { turnId: 'turn' });
+    const out = await t.compact(listed);
+    expect(indexHolding(out, 'LATE-IN-TURN')).toBe(out.findIndex((m) => m.text === 'A new question.') - 1);
+  });
+
+  it('23: puts a delivery back into an empty history and counts it truly', async () => {
+    const t = harness();
+    await t.submit([message('user', 'gone')], 'INTO-EMPTY', 'peer');
+    const out = await t.compact([]);
+    expect(holding(out, 'INTO-EMPTY')).toHaveLength(1);
+    expect(t.toasts.at(-1)).toMatch(/^kept 0\/0 listed messages \(0 rebuilt and 0 deleted, without what the host stores beside them; 1 delivered prompt\(s\) put back\)/);
   });
 });

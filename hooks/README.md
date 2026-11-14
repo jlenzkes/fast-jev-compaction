@@ -99,8 +99,12 @@ means the user's own) and where the history stood. `hooks/deliveries.ts`
 then decides each one at the next compaction: present when the list holds the
 plugin's own put-back text or the delivery's own words before the next tool
 result past its point; otherwise put back as a plain user message after the
-message that was newest when it arrived (idle) or after the tool round that
-followed (mid-turn), never between a tool call and its result. Where the
+message that was newest when it arrived (idle), or, mid-turn, after the tool
+result it came in with: the host hands a queued prompt to `prompt.submit`
+after that result is stored (measured with the debug log below in a headless
+session on 14 Nov 2026). A mid-turn prompt whose turn ended before any tool
+result goes at the end of that turn. Nothing is placed between a tool call
+and its result. Where the
 point is gone or the place is a guess, the receipt says "placed by
 estimate"; a second copy is preferred to a loss. Each put-back opens with a
 line the plugin writes, carrying a mark random per compaction and naming the
@@ -113,7 +117,9 @@ built-in summary is handed the history with the deliveries put back. The
 library never sees a put-back or a receipt: it compacts the listed messages,
 less the plugin's earlier receipts, and the put-backs are inserted after, so
 Jev's state, the pinned messages and the fallback decision are as without
-them. The toast counts what the plugin can see: `kept N/M listed messages
+them. Unless the `goal` option is set, Jev's goal is the user's last three
+prompts, leaving out put-backs from anyone else, host notices (task
+notifications, command echoes, peer messages) and receipts. The toast counts what the plugin can see: `kept N/M listed messages
 (R rebuilt and D deleted, without what the host stores beside them; P
 delivered prompt(s) put back), no summary (X% smaller as returned; ...)`.
 With `receipt` on, the main conversation's handed-back history ends with a

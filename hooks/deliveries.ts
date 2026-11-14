@@ -245,6 +245,14 @@ export function legalAfter(messages: readonly SessionMessage[], after: number): 
   }
 }
 
+/**
+ * Why a put-back's place is a guess: its point is gone (`orphan`); it sits
+ * beside a plain user message, which the host may have kept with it, so it can
+ * appear twice (`beside-kept`); or it arrived mid-turn and its turn ended
+ * before any tool result, so it goes at the end of that turn (`turn-end`).
+ */
+export type Estimate = 'orphan' | 'beside-kept' | 'turn-end';
+
 export type Outcome =
   /** The history already holds it: its own message, or one built to put it back. */
   | { kind: 'present' }
@@ -256,7 +264,7 @@ export type Outcome =
    * beside a plain user message, which the host may have kept with it, so it
    * can appear twice (`beside-kept`).
    */
-  | { kind: 'placed'; after: number; text: string; estimate?: 'orphan' | 'beside-kept' };
+  | { kind: 'placed'; after: number; text: string; estimate?: Estimate };
 
 /**
  * Decides, for each recorded delivery, what a compaction over `listed` does
@@ -285,15 +293,32 @@ export function plan(listed: readonly SessionMessage[], deliveries: readonly Del
       return;
     }
     let next = at + 1;
+    let turnEnd = -1;
     while (next < listed.length && !listed[next]!.toolResults?.length) {
       if (isOccurrence(listed[next], delivery)) {
         outcomes[n] = { kind: 'present' };
         return;
       }
+      if (turnEnd < 0 && isPlainUser(listed[next])) turnEnd = next;
       next++;
     }
     const text = putBackText(delivery, mark);
     if (delivery.midTurn) {
+      // The host hands a prompt queued mid-turn to `prompt.submit` when it
+      // takes it off the queue, after the tool result it then sits beside is
+      // stored (measured in a headless session, 14 Nov 2026): the point it
+      // arrived at is that result. Submitted while the tool still ran, the
+      // point is the call, and the result that follows is its place.
+      if (listed[at]?.toolResults?.length) {
+        outcomes[n] = { kind: 'placed', after: legalAfter(listed, at), text };
+        return;
+      }
+      // Its turn ended (a plain user message began the next) before any tool
+      // result: it belongs before that message, not after a later turn's tool.
+      if (turnEnd >= 0) {
+        outcomes[n] = { kind: 'placed', after: legalAfter(listed, turnEnd - 1), text, estimate: 'turn-end' };
+        return;
+      }
       if (next >= listed.length) return; // waiting
       outcomes[n] = { kind: 'placed', after: legalAfter(listed, next), text };
       return;
@@ -401,18 +426,6 @@ function gist(body: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function sharedPrefix(texts: readonly string[]): number {
-  if (texts.length < 2) return 0;
-  const first = texts[0]!;
-  let common = first.length;
-  for (const text of texts) {
-    let i = 0;
-    while (i < common && i < text.length && text[i] === first[i]) i++;
-    common = i;
-  }
-  return common > 0 ? first.lastIndexOf(' ', common) + 1 : 0;
-}
-
 export type ReceiptInput = {
   mark: string;
   listed: number;
@@ -423,7 +436,7 @@ export type ReceiptInput = {
   resultsCut: number;
   callsDeleted: number;
   /** The deliveries put back, each with why its place is a guess, if it is. */
-  restored: readonly { delivery: Delivery; estimate?: 'orphan' | 'beside-kept' }[];
+  restored: readonly { delivery: Delivery; estimate?: Estimate }[];
   droppedAtBound: number;
   durable: boolean;
   transcript?: string;
@@ -477,20 +490,17 @@ export function receipt(input: ReceiptInput): string {
       attachments: d.attachments,
       estimate,
     }));
-    const skip = new Map<string, number>();
-    for (const who of new Set(rows.map((r) => r.who))) {
-      skip.set(who, sharedPrefix(rows.filter((r) => r.who === who).map((r) => r.gist)));
-    }
     for (const r of rows) {
-      const s = skip.get(r.who) ?? 0;
       const more = r.attachments > 0 ? ` (+${r.attachments} attachment(s) not carried)` : '';
       const guess =
         r.estimate === 'orphan'
           ? ' (placed by estimate: its place was not found)'
           : r.estimate === 'beside-kept'
             ? ' (placed by estimate: the host may also have kept it, so it can appear twice)'
-            : '';
-      items.push(`- from ${r.who}${more}${guess}: ${excerpt(`${s > 0 ? '...' : ''}${r.gist.slice(s)}`)}`);
+            : r.estimate === 'turn-end'
+              ? ' (placed by estimate: its turn ended before a tool result came)'
+              : '';
+      items.push(`- from ${r.who}${more}${guess}: ${excerpt(r.gist)}`);
     }
   }
   const lines = [...head];
@@ -506,6 +516,31 @@ export function receipt(input: ReceiptInput): string {
   if (shown < items.length) lines.push(`- and ${items.length - shown} more`);
   lines.push(...tail);
   return lines.join('\n');
+}
+
+/** A put-back whose sender is not the user, by the header the plugin writes. */
+const NOT_THE_USER = /^\[fast-jev-compaction put-back [0-9a-f]{8}\] (Delivered by|Sent by the SDK host)/;
+/** Text the host writes into a plain user message: notices, command echoes, reports. */
+const HOST_TEXT = /^(<task-notification>|<local-command-|<command-name>|<command-message>|Another Claude session sent a message)/;
+
+/**
+ * The goal Jev scores relevance against: the user's last three prompts, as
+ * the library's default takes them, but only what the user wrote. A put-back
+ * from anyone else, a host notice and a receipt are left out; a put-back of
+ * the user's own words counts as those words. Empty when the history holds
+ * no prompt from the user.
+ */
+export function operatorGoal(messages: readonly SessionMessage[]): string {
+  const prompts: string[] = [];
+  for (const m of messages) {
+    if (!isPlainUser(m) || !m.text.trim()) continue;
+    if (NOT_THE_USER.test(m.text) || HOST_TEXT.test(m.text) || /^\[fast-jev-compaction receipt /.test(m.text)) continue;
+    const words = /^\[fast-jev-compaction put-back [0-9a-f]{8}\] /.test(m.text)
+      ? m.text.split('\n').slice(1).map((l) => l.replace(/^ {2}/, '')).join('\n')
+      : m.text;
+    prompts.push(words.length > 500 ? `${words.slice(0, 500)}...` : words);
+  }
+  return prompts.slice(-3).join('\n');
 }
 
 /** A fresh mark for one compaction's receipt and put-back messages. */
