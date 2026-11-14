@@ -207,6 +207,38 @@ describe('round one, finding 5, and N2: anchors keep chronology, and an estimate
     expect(indexHolding(await t.compact(), 'BEFORE-ANYTHING')).toBe(0);
   });
 
+  it('Hydrogen 1 and 5: puts deliveries back into a history of no message and of one, counted truly', async () => {
+    const empty = harness();
+    await empty.submit([message('user', 'gone')], 'INTO-EMPTY', 'peer');
+    const none = await empty.compact([]);
+    expect(holding(none, 'INTO-EMPTY')).toHaveLength(1);
+    expect(empty.toasts.at(-1)).toMatch(/^kept 0\/0 listed messages \(0 rebuilt and 0 deleted, without what the host stores beside them; 1 delivered prompt\(s\) put back\)/);
+    // One message: an orphan goes after it, its first line saying its place is not known.
+    const one = harness({ receipt: false });
+    await one.submit([message('user', 'gone')], 'INTO-ONE', 'peer');
+    const out = await one.compact([message('assistant', 'only', { handle: 'o' })]);
+    expect(out.map((m) => m.text.split('\n')[0]!.slice(0, 30))).toEqual(['only', '[fast-jev-compaction put-back ']);
+    expect(out[1]!.text.split('\n')[0]).toContain('Its place in the history is not known');
+    // One message the delivery sat beside, a plain user message: the host keeps it.
+    const kept = harness({ receipt: false });
+    const only = message('user', 'only prompt', { handle: 'p' });
+    await kept.submit([only], 'BESIDE-ONLY', 'peer');
+    expect(holding(await kept.compact([only]), 'BESIDE-ONLY')).toHaveLength(0);
+  });
+
+  it('Hydrogen 4: with deliveries present, the fallback decision and the pinned messages are as without them', async () => {
+    const options = { receipt: false, preserveRecentMessages: 2, minReductionRatio: 0.8 };
+    const plain = harness(options);
+    const plainOut = await plain.compact(history().slice(0, 7));
+    const t = harness(options);
+    for (const words of ['NEW-RECENT-1', 'NEW-RECENT-2', 'y'.repeat(20_000)]) await t.submit(history().slice(0, 6), words, 'composer', { turnId: 'turn' });
+    const out = await t.compact(history().slice(0, 7));
+    expect(t.fallbacks).toHaveLength(plain.fallbacks.length);
+    expect(t.bodies).toEqual(plain.bodies);
+    const t2 = (ms: typeof out) => ms.find((m) => m.toolResults?.[0]?.tool_use_id === 't2')?.toolResults?.[0]?.text;
+    expect(t2(out)).toBe(t2(plainOut));
+  });
+
   it('finds its place in a list longer than the snapshot', async () => {
     const t = harness({ receipt: false });
     const long = [message('user', 'start', { handle: 'u0' }), ...Array.from({ length: 4100 }, (_, i) => message('assistant', `assistant-${i}`, { handle: `a-${i}` }))];

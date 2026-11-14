@@ -111,6 +111,9 @@ makes about this and what a wrong one costs; in short:
   end of its turn when no tool result followed; and as an orphan, in
   delivery order, when its point is gone. Nothing is placed between a tool
   call and its result, and an estimate says so in the put-back's first line.
+  Whether a host delivers a prompt while a compaction runs is not known; if
+  one does, the prompt is anchored to the history before that compaction,
+  and when the compaction deletes its point it comes back as an orphan.
 - The library never sees a receipt. It compacts the listed messages less the
   plugin's earlier receipts, and the put-backs are inserted after, so that
   compaction's Jev state, pinned messages and fallback decision are as
