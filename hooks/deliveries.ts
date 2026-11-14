@@ -16,6 +16,9 @@ import type { PromptOrigin, SessionMessage } from 'claude-code';
 // ---------------------------------------------------------------------------
 // Where a prompt arrived
 
+/** The first line of a receipt this plugin writes. */
+const RECEIPT_LINE = /^\[fast-jev-compaction receipt [0-9a-f]{8}\] /;
+
 /** How many trailing messages identify the point a prompt arrived at. */
 const WINDOW = 8;
 
@@ -54,7 +57,11 @@ export function fnv1a(text: string): string {
  */
 export type Anchor = { after?: string; past: number; window: string[] };
 
-export function anchorOf(messages: readonly SessionMessage[]): Anchor {
+export function anchorOf(snapshot: readonly SessionMessage[]): Anchor {
+  // A receipt is taken out at the next compaction, so a point is never one:
+  // what arrived after a receipt arrived after the message before it. A
+  // message that only looks like a receipt is skipped here and nowhere else.
+  const messages = snapshot.filter((m) => !(isPlainUser(m) && RECEIPT_LINE.test(m.text)));
   const window = messages.slice(-WINDOW).map(fingerprint);
   for (let i = messages.length - 1; i >= 0; i--) {
     const results = messages[i]!.toolResults;

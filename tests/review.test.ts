@@ -447,3 +447,19 @@ describe('third review', () => {
     expect(t.toasts.at(-1)).toMatch(/^kept 0\/0 listed messages \(0 rebuilt and 0 deleted, without what the host stores beside them; 1 delivered prompt\(s\) put back\)/);
   });
 });
+
+describe('probe: a receipt is taken out at the next compaction, with what the host stored beside it', () => {
+  it('puts back a delivery that arrived beside the receipt where the receipt stood, not as an orphan', async () => {
+    // Measured 14 Nov 2026: the host keeps the receipt with a handle and
+    // stores what arrives after it beside it; taking the receipt out at the
+    // next compaction drops those records with it.
+    const t = harness();
+    const first = await t.compact();
+    await t.submit(first, 'BESIDE-THE-RECEIPT', 'peer');
+    const later = [...first, message('assistant', 'Replying to the report.', { handle: 'r1' }), message('user', 'next', { handle: 'r2' })];
+    const out = await t.compact(later);
+    const at = indexHolding(out, 'BESIDE-THE-RECEIPT');
+    expect(out[at + 1]!.text).toBe('Replying to the report.');
+    expect(out.at(-1)!.text).not.toContain('placed by estimate: its place was not found');
+  });
+});

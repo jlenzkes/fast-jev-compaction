@@ -104,7 +104,10 @@ result it came in with: the host hands a queued prompt to `prompt.submit`
 after that result is stored (measured with the debug log below in a headless
 session on 14 Nov 2026). A mid-turn prompt whose turn ended before any tool
 result goes at the end of that turn. Nothing is placed between a tool call
-and its result. Where the
+and its result. The host keeps the receipt with a handle and stores what
+arrives after it beside it; the next compaction takes the receipt out, and
+with it those records, so a delivery that arrived after a receipt is
+anchored to the message before the receipt and put back there. Where the
 point is gone or the place is a guess, the receipt says "placed by
 estimate"; a second copy is preferred to a loss. Each put-back opens with a
 line the plugin writes, carrying a mark random per compaction and naming the
