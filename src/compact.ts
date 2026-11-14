@@ -129,6 +129,39 @@ export function decideCall(
   return { ...base, action: 'drop_call', reason: 'call_dropped' };
 }
 
+/**
+ * Requests in flight at once. A 429 or 5xx is retried once, at once: the hook
+ * runtime type-checks against plain ES2023, which has no timer to wait with.
+ */
+const JEV_CONCURRENCY = 8;
+
+async function askOnce(
+  asker: JevAsker,
+  state: CompactionState,
+  batch: readonly ToolCall[],
+): Promise<Map<string, CallAnswer>> {
+  try {
+    return await askBatch(asker, state, batch);
+  } catch (error) {
+    if (!/^Jev request failed \((?:429|5\d\d)\)/.test(String((error as Error)?.message))) throw error;
+    return askBatch(asker, state, batch);
+  }
+}
+
+/** Runs `run` over `items` with at most `limit` in flight; results keep their order. */
+async function inPool<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await run(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 async function askBatch(
   asker: JevAsker,
   state: CompactionState,
@@ -429,7 +462,7 @@ export async function compact(
       batchCalls(group.calls, group.state.tokens, resolved).map((batch) => ({ state: group.state.state, batch })),
     );
     requests = jobs.length;
-    const answered = await Promise.all(jobs.map((job) => askBatch(asker, job.state, job.batch)));
+    const answered = await inPool(jobs, JEV_CONCURRENCY, (job) => askOnce(asker, job.state, job.batch));
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }
 

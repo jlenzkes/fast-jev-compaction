@@ -524,6 +524,38 @@ describe('compact', () => {
     }
   });
 
+  it('caps concurrent requests and retries a 429 or 5xx once', async () => {
+    const messages = [message('user', 'go')];
+    for (let i = 0; i < 60; i += 1) messages.push(call(`r${i}`, 'Bash', { command: `ls ${i}` }, 'x'.repeat(500)), result(`r${i}`, 'x'.repeat(500)));
+    messages.push(message('assistant', 'done'));
+    const options = { preserveRecentMessages: 1, maxRequestTokens: 0 };
+    const stateTokens = fitState(messages, collectToolCalls(messages, 1), { ...fit, goal: '', preserveRecentMessages: 1 }).tokens;
+    options.maxRequestTokens = stateTokens + 200;
+    let inFlight = 0;
+    let most = 0;
+    let calls = 0;
+    const busy = (status: number): JevAsker => ({
+      async ask(state, questions) {
+        calls += 1;
+        const first = calls === 1;
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        if (first) throw new Error(`Jev request failed (${status}): busy`);
+        return fakeJev(() => 0.1).ask(state, questions);
+      },
+    });
+    const output = await compact(messages, busy(503), options);
+    expect(output.stats.requests).toBeGreaterThan(8);
+    expect(calls).toBe(output.stats.requests + 1);
+    expect(most).toBeLessThanOrEqual(8);
+    expect(output.stats.callsDropped).toBe(60);
+
+    calls = 0;
+    await expect(compact(messages, busy(400), options)).rejects.toThrow(/failed \(400\)/);
+  });
+
   it('rejects malformed answers', async () => {
     const broken: JevAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),
