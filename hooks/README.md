@@ -69,8 +69,8 @@ The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
-`model` is passed straight to the library; see the root README for what they
+Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
+`model` and `receipt` is passed straight to the library; see the root README for what they
 do. The `session.compact` hook runs at most 8 Jev requests at once and retries
 one that fails with a 429 or 5xx once, immediately. If Jev still fails,
 the response is malformed, the key is unavailable, or the estimated reduction is below
@@ -92,19 +92,40 @@ a prompt typed or delivered while a turn runs (a `queued_command`
 attachment), a subagent's report that starts a turn of its own, a Stop
 hook's feedback. `session.compact` never lists them, and they survive only
 when the message they sit beside goes back with its handle, which only a
-plain user message does. The `prompt.submit` hook therefore notes every
-prompt that is not the user's own Enter at an idle prompt, with where it
-arrived (the last tool result then, and how many messages followed it); the
-`session.compact` hook puts each back as a plain user message after the
-message it sat beside, unless it is already a message of its own or sits
-beside a plain user message, which the host keeps whole. The notes live in
-memory, so a plugin reload forgets the ones not yet compacted. Hook feedback
-never passes through `prompt.submit` and cannot be put back. The toast counts
-what it can see: `kept N/M listed messages (R rebuilt, without what the host
-stores beside them; P delivered prompt(s) put back)`. With `receipt` on, the
-handed-back history ends with a plain user message saying the same, listing
-the prompts put back (capped at 12, then "and N more") and naming the
-transcript file when the usual path for it exists.
+plain user message does. The `prompt.submit` hook notes every prompt it sees
+that is not the user's own at an idle prompt (every prompt with a `turnId`,
+whether or not it asked to wait), with the origin `next` accepted (absent
+means the user's own) and where the history stood. `hooks/deliveries.ts`
+then decides each one at the next compaction: present when the list holds the
+plugin's own put-back text or the delivery's own words before the next tool
+result past its point; otherwise put back as a plain user message after the
+message that was newest when it arrived (idle) or after the tool round that
+followed (mid-turn), never between a tool call and its result. Where the
+point is gone or the place is a guess, the receipt says "placed by
+estimate"; a second copy is preferred to a loss. Each put-back opens with a
+line the plugin writes, carrying a mark random per compaction and naming the
+sender from the accepted origin, and indents every delivered line. The record
+is kept per session id in `$.store` (at most 100 deliveries and 512 KiB per
+session, 6 sessions), and an entry leaves it only when a later listing shows
+its put-back text, it is seen as its own message, or a built-in summary was
+handed it; a `precompute` changes nothing. When the plugin path fails, the
+built-in summary is handed the history with the deliveries put back. The
+library never sees a put-back or a receipt: it compacts the listed messages,
+less the plugin's earlier receipts, and the put-backs are inserted after, so
+Jev's state, the pinned messages and the fallback decision are as without
+them. The toast counts what the plugin can see: `kept N/M listed messages
+(R rebuilt and D deleted, without what the host stores beside them; P
+delivered prompt(s) put back), no summary (X% smaller as returned; ...)`.
+With `receipt` on, the main conversation's handed-back history ends with a
+receipt (at most 20 lines and 4000 characters) saying the same and naming
+the transcript file when the usual path for it exists; a subagent's
+compaction gets none.
+
+For maintainers: set the environment variable `FAST_JEV_DEBUG_LOG` to a file
+path and each `prompt.submit` and `session.compact` dispatch appends one JSON
+line to it (origins, `turnId`, `wait`, text length and hash, never the text,
+the listed history's length and newest message, the trigger). It is off
+unless set.
 
 ## Scope and caveat
 

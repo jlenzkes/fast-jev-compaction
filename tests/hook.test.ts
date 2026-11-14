@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  account,
   anchorOf,
   compactSession,
   decisionLog,
@@ -10,9 +9,11 @@ import {
   summarize,
   receipt,
   toSessionMessages,
-  withDeliveries,
   type Delivery,
+  type Anchor,
+  type Outcome,
 } from '../hooks/fast-jev.ts';
+import { legalAfter, locate, plan } from '../hooks/deliveries.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
@@ -126,62 +127,98 @@ describe('session message mapping', () => {
 });
 
 describe('deliveries placed back', () => {
-  const delivery = (text: string, extra: Partial<Delivery> = {}): Delivery => ({
-    text,
-    origin: 'peer',
+  const at = (i: number, text: string, extra: Partial<SessionMessage> = {}) => message(i % 2 ? 'assistant' : 'user', text, extra);
+  const delivery = (body: string, anchor: Anchor | undefined, extra: Partial<Delivery> = {}): Delivery => ({
+    seq: 1,
+    body,
     midTurn: false,
-    past: 0,
+    attachments: 0,
+    placedAs: [],
+    ...(anchor ? { anchor } : {}),
     ...extra,
   });
+  const where = (outcome: Outcome | undefined) => (outcome?.kind === 'placed' ? outcome.after : outcome?.kind);
 
-  it('anchors a prompt arriving now past the last tool result, or past the start', () => {
-    expect(anchorOf(transcript())).toEqual({ after: 'tool-2', past: 2 });
-    expect(anchorOf(transcript().slice(0, 1))).toEqual({ past: 1 });
+  it('anchors a prompt arriving now past the last tool result, and finds that point again', () => {
+    const messages = transcript();
+    const anchor = anchorOf(messages.slice(0, 6));
+    expect(anchor).toMatchObject({ after: 'tool-2', past: 1 });
+    expect(locate(messages, anchor)).toBe(5);
+    expect(locate([message('user', 'other')], anchor)).toBeUndefined();
+    expect(locate(messages, anchorOf([]))).toBe(-1);
   });
 
   it('holds back a mid-turn delivery no tool result has followed yet', () => {
     const messages = transcript();
-    const out = withDeliveries(messages, [delivery('later', { midTurn: true, after: 'tool-2', past: 0 })]);
-    expect(out.messages).toHaveLength(messages.length);
-    expect(out.waiting.map((d) => d.text)).toEqual(['later']);
-    expect(out.restored).toEqual([]);
+    const [o] = plan(messages, [delivery('later', anchorOf(messages), { midTurn: true })], 'm');
+    expect(o?.kind).toBe('waiting');
   });
 
-  it('keeps the words of a delivery whose anchor was compacted away, before the newest message', () => {
+  it('puts a mid-turn delivery after the first tool round past its point, not the last', () => {
     const messages = transcript();
-    const out = withDeliveries(messages, [delivery('orphan', { after: 'tool-0', past: 1 })]);
-    expect(out.messages.map((m) => m.text).slice(-2)).toEqual([
-      expect.stringContaining('\norphan'),
-      'go ahead',
-    ]);
+    const [o] = plan(messages, [delivery('queued', anchorOf(messages.slice(0, 2)), { midTurn: true })], 'm');
+    expect(where(o)).toBe(2);
   });
 
-  it('does not take a short delivery for an earlier message that merely contains its words', () => {
-    const messages = transcript();
-    // 'go' is inside 'go ahead', a plain user message after the anchor, but
-    // 'go ahead' is not 'go' and does not start with it as a line of its own.
-    const out = withDeliveries(messages, [delivery('go', { midTurn: true, after: 'tool-1', past: 0 })]);
-    expect(out.restored.map((d) => d.text)).toEqual(['go']);
+  it('never puts a delivery between a parallel batch of calls and their results', () => {
+    const batch = [
+      message('user', 'go'),
+      message('assistant', '', {
+        toolUses: ['p1', 'p2', 'p3'].map((id) => ({ tool_use_id: id, tool: 'Agent', input: {} })),
+      }),
+      ...['p1', 'p2', 'p3'].map((id) => message('user', '', { toolResults: [{ tool_use_id: id, text: 'done', isError: false }] })),
+      message('assistant', 'All three are back.'),
+    ];
+    const [o] = plan(batch, [delivery('typed during the batch', anchorOf(batch.slice(0, 2)), { midTurn: true })], 'm');
+    expect(where(o)).toBe(4);
+    expect(legalAfter(batch, 2)).toBe(4);
+    expect(legalAfter(batch, 1)).toBe(4);
+    expect(legalAfter(batch, 5)).toBe(5);
   });
 
-  it('lists each put-back delivery by sender and its own first words, capped', () => {
-    const frame = 'Another Claude session sent a message:\n<agent-message from="a{n}">\n[Hand-back] The report follows:\n  Report {n} says ';
-    const restored = Array.from({ length: 14 }, (_, n) =>
-      delivery(`${frame.replaceAll('{n}', String(n))}${'ok '.repeat(n + 1)}\n</agent-message>`),
-    );
+  it('keeps an unanchored delivery out of a tool pair at the end of the history', () => {
+    const messages = transcript().slice(0, 4); // ends in call tool-2 and its result
+    const [o] = plan(messages, [delivery('orphan', { after: 'tool-0', past: 0, window: ['nowhere'] })], 'm');
+    expect(where(o)).toBe(3);
+    expect(o).toMatchObject({ estimate: 'orphan' });
+  });
+
+  it('does not take a later message with the same words for a mid-turn delivery', () => {
+    const messages = [...transcript(), message('assistant', 'ok'), message('user', 'yes')];
+    const [o] = plan(messages, [delivery('yes', anchorOf(messages.slice(0, 2)), { midTurn: true })], 'm');
+    expect(where(o)).toBe(2);
+  });
+
+  it('marks a delivery beside a plain user message as placed by estimate, rather than drop it', () => {
     const messages = transcript();
-    const text = receipt(
-      { messages, decisions: [], stats: { messagesBefore: 7, messagesAfter: 7, charsBefore: 1, charsAfter: 1, calls: 0, kept: 0, resultsDropped: 0, callsDropped: 0, callsStubbed: 3, stubsDropped: 0, pinned: 0, stateTokens: 0, stateStage: '', requests: 0, ms: 0 } },
-      account(messages, [...messages, ...restored.map((d) => ({ role: 'user' as const, text: d.text, toolUses: [] }))], restored),
-    );
+    const [o] = plan(messages, [delivery('report', anchorOf(messages))], 'm');
+    expect(o).toMatchObject({ kind: 'placed', after: 6, estimate: 'beside-kept' });
+  });
+
+  it('lists each put-back by its sender and its own words, one quoted line each, capped', () => {
+    const frame = (n: number) =>
+      `Another Claude session sent a message:\n<agent-message from="a${n}">\n[Hand-back] The report follows:\n  Report ${n} says ${'ok '.repeat(n + 1)}\n</agent-message>`;
+    const restored = Array.from({ length: 30 }, (_, n) => ({ delivery: delivery(frame(n), undefined, { origin: { kind: 'peer' } }) }));
+    const text = receipt({
+      mark: 'abcdef12',
+      listed: 7,
+      kept: 7,
+      rebuilt: 4,
+      deleted: 0,
+      stubbed: 3,
+      resultsCut: 0,
+      callsDeleted: 0,
+      restored,
+      droppedAtBound: 0,
+      durable: true,
+    });
     const lines = text.split('\n');
     expect(lines[0]).toContain('3 tool call(s) cut to a stub');
-    expect(lines).toContain('Put back as messages of their own (14), each where it arrived:');
-    expect(lines).toContain('- peer a0: ...0 says ok');
-    expect(lines).toContain('- peer a11: ...11 says ok ok ok ok ok ok ok ok ok ok ok ok');
-    expect(lines).not.toContain('- peer a12: ...12 says ok ok ok ok ok ok ok ok ok ok ok ok ok');
-    expect(lines).toContain('- and 2 more');
+    expect(lines).toContain('- from another Claude session: "...0 says ok"');
+    expect(lines.filter((l) => l.startsWith('- ')).every((l) => /^- (from [^"]+: ".*"|and \d+ more)$/.test(l))).toBe(true);
+    expect(lines.some((l) => /^- and \d+ more$/.test(l))).toBe(true);
     expect(lines.at(-1)).toMatch(/^A figure you recall that is not in your visible text/);
+    expect(lines.length).toBeLessThanOrEqual(20);
   });
 });
 
