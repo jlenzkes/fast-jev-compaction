@@ -511,6 +511,19 @@ describe('compact', () => {
     expect(reductionRatio(output)).toBe(0);
   });
 
+  it('does not take a tool output that quotes a note for a stub', async () => {
+    const outputs = [
+      "const STUB_NOTE = '[fast-jev-compaction stub]';",
+      `${'x'.repeat(3000)}\n[fast-jev-compaction truncated 123 chars of this tool result; re-run the tool if needed]\n${'y'.repeat(3000)}`,
+      `${'x'.repeat(3000)}\n[fast-jev-compaction stub]`,
+    ];
+    for (const text of outputs) {
+      const messages = [message('user', 'go'), call('q', 'Read', { file_path: 'src/compact.ts' }, text), result('q', text), message('assistant', 'done')];
+      const output = await compact(messages, fakeJev(() => 0.1), { dropCalls: false, preserveRecentMessages: 1 });
+      expect(output.decisions.map((d) => d.reason)).toEqual(['call_stubbed']);
+    }
+  });
+
   it('rejects malformed answers', async () => {
     const broken: JevAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),

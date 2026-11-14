@@ -147,14 +147,25 @@ async function askBatch(
   );
 }
 
-const RESULT_NOTE = /\[fast-jev-compaction (?:truncated \d+ chars of this tool result|stub\])/;
+const TRUNCATION_NOTE = /\[fast-jev-compaction truncated \d+ chars of this tool result(?: \(error\))?; re-run the tool if needed\]$/;
 
 /** Appended to a stubbed result too short to truncate, so `alreadyStubbed` knows it. */
 const STUB_NOTE = '[fast-jev-compaction stub]';
 
 /**
- * The ids of calls an earlier compaction already cut: the result carries this
- * plugin's truncation note, and the input is either already cut to
+ * Whether `text` is one `truncatedResultText` could have produced: a note at
+ * the very end, behind at most a head (truncated) or a short result (stubbed).
+ * A tool output that merely quotes a note is not.
+ */
+function isCutResult(text: string, headChars: number): boolean {
+  if (text.endsWith(STUB_NOTE)) return text.length <= headChars + 121 + STUB_NOTE.length;
+  const note = TRUNCATION_NOTE.exec(text);
+  return note !== null && note.index <= headChars + 1;
+}
+
+/**
+ * The ids of calls an earlier compaction already cut: the result is one this
+ * plugin cut (`isCutResult`), and the input is either already cut to
  * `input_head` and `note` or short enough that stubbing leaves it as it is.
  */
 export function alreadyStubbed(
@@ -171,7 +182,7 @@ export function alreadyStubbed(
   }
   const ids = new Set<string>();
   for (const call of calls) {
-    if (!RESULT_NOTE.test(results.get(call.tool_use_id) ?? '')) continue;
+    if (!isCutResult(results.get(call.tool_use_id) ?? '', headChars)) continue;
     const keys = Object.keys(call.input).sort().join(',');
     if (keys === 'input_head,note' || truncatedInput(call.input, headChars) === call.input) {
       ids.add(call.id);
@@ -182,7 +193,7 @@ export function alreadyStubbed(
 
 function truncatedResultText(text: string, isError: boolean, headChars: number, stub = false): string {
   if (text.length <= headChars + 120) {
-    return stub && !RESULT_NOTE.test(text) ? `${text}${text ? '\n' : ''}${STUB_NOTE}` : text;
+    return stub && !isCutResult(text, headChars) ? `${text}${text ? '\n' : ''}${STUB_NOTE}` : text;
   }
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
   return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
