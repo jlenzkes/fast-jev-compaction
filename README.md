@@ -35,7 +35,12 @@ built-in compaction summary with the original messages.
    `[… N chars omitted …]` note; old tool calls reduced to one line each
    (`t12 Read file_path=src/a.ts → ok 480ch`); old call-less messages left
    out; runs of old call-only messages folded into one entry. If it still
-   does not fit, compaction throws. Tokens are estimated without a tokenizer (a
+   does not fit (long sessions), the calls are asked in contiguous windows,
+   halved until each window's state fits: a window keeps the goal, the first
+   message, the pinned newest messages and its own messages in full. A call
+   whose window cannot fit even alone is not asked, so it stays. When the
+   goal, the first message and the pinned messages alone do not fit, no window
+   can, so no call is asked and every call stays. Tokens are estimated without a tokenizer (a
    word per six letters, half a token per digit, ~one per other symbol),
    calibrated to land a little above the counts Jev reports.
 4. For every non-pinned call Jev gets two `noul` questions: should the **call**
@@ -44,8 +49,11 @@ built-in compaction summary with the original messages.
    tool would not do).
 5. Questions are split into as many requests as needed so state plus questions
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
-   limit). The same full state is resent with every request; requests run
-   concurrently and their answers are merged.
+   limit). The same state (each window's own, when windowed) is resent with
+   every request. At most 8 requests are in flight at once; a request that
+   fails with a 429 or 5xx is retried once, immediately, with no backoff,
+   because no timer is confirmed in the hook runtime (it type-checks against
+   plain ES2023). The answers are merged.
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
    - else `keepCall ≥ threshold` → keep the call, truncate the result to its
@@ -55,8 +63,8 @@ built-in compaction summary with the original messages.
    removed, untouched messages are returned as the same objects, and no result
    is ever left without its call.
 
-Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+Jev failures, malformed answers or a missing key
+throw; the caller (or the Claude Code hook) decides what to fall back to.
 
 ## Install and usage
 
@@ -112,11 +120,13 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
-| `dropCalls` | `true` in the library, `false` in the plugin | `false` turns a call Jev rates as no longer needed into a stub (tool name, input and result cut to `truncateHeadChars`) instead of deleting it; a call an earlier compaction already stubbed is deleted |
+| `dropCalls` | `true` in the library, `false` in the plugin | `false` turns a call Jev rates as no longer needed into a stub (tool name, input and result cut to `truncateHeadChars`) instead of deleting it; a call an earlier compaction already stubbed is deleted. A stubbed result too short to cut gets `[fast-jev-compaction stub]` appended so the next compaction recognizes it; a result counts as a stub only when it ends in this plugin's note and is no longer than a head plus the note, so a tool output that quotes a note is not one |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
-stage was needed, and the number of requests.
+stage was needed, and the number of requests. The character counts leave out
+a stub's `[fast-jev-compaction stub]` note, so a stub never counts as larger
+than the result it replaced.
 
 ## Limitations
 

@@ -21,7 +21,10 @@ The state is fitted into `maxStateTokens` in stages: tool inputs are
 truncated, then long texts are abridged (oldest first, pinned messages last),
 then old messages collapse to a `[… N chars omitted …]` note, then old tool
 calls shrink to one line each, then old call-less messages are left out and
-runs of old call-only messages fold together. Questions are split into as many requests as
+runs of old call-only messages fold together. If it still does not fit, the
+calls are asked in contiguous windows, halved until each window's state fits;
+a call whose window cannot fit alone is not asked and stays, and when the goal
+and pinned messages alone do not fit, no call is asked and every call stays. Questions are split into as many requests as
 needed so each request (state plus questions) stays under `maxRequestTokens`;
 the full state is resent with every request. Token counts are estimated
 without a tokenizer, calibrated to land a little above what Jev reports.
@@ -67,9 +70,9 @@ development setup.
 
 Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
 `model` is passed straight to the library; see the root README for what they
-do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
-the response is malformed, the key is unavailable, the history cannot be
-fitted into the state budget, or the estimated reduction is below
+do. The `session.compact` hook runs at most 8 Jev requests at once and retries
+one that fails with a 429 or 5xx once, immediately. If Jev still fails,
+the response is malformed, the key is unavailable, or the estimated reduction is below
 `minReductionRatio`, the hook logs a fallback and delegates to Claude Code's
 built-in compaction. The outcome is shown as a toast and logged with the
 reduction, per-reason counts, state size and request count; a per-call

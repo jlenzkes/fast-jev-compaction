@@ -1,5 +1,5 @@
 import { noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { collectToolCalls, estimateTokens, fitState, goalFromMessages, isPinned } from './state.js';
 import type {
   CallAnswer,
   CallDecision,
@@ -129,6 +129,39 @@ export function decideCall(
   return { ...base, action: 'drop_call', reason: 'call_dropped' };
 }
 
+/**
+ * Requests in flight at once. A 429 or 5xx is retried once, at once: the hook
+ * runtime type-checks against plain ES2023, which has no timer to wait with.
+ */
+const JEV_CONCURRENCY = 8;
+
+async function askOnce(
+  asker: JevAsker,
+  state: CompactionState,
+  batch: readonly ToolCall[],
+): Promise<Map<string, CallAnswer>> {
+  try {
+    return await askBatch(asker, state, batch);
+  } catch (error) {
+    if (!/^Jev request failed \((?:429|5\d\d)\)/.test(String((error as Error)?.message))) throw error;
+    return askBatch(asker, state, batch);
+  }
+}
+
+/** Runs `run` over `items` with at most `limit` in flight; results keep their order. */
+async function inPool<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await run(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 async function askBatch(
   asker: JevAsker,
   state: CompactionState,
@@ -147,11 +180,25 @@ async function askBatch(
   );
 }
 
-const RESULT_NOTE = /\[fast-jev-compaction truncated \d+ chars of this tool result/;
+const TRUNCATION_NOTE = /\[fast-jev-compaction truncated \d+ chars of this tool result(?: \(error\))?; re-run the tool if needed\]$/;
+
+/** Appended to a stubbed result too short to truncate, so `alreadyStubbed` knows it. */
+const STUB_NOTE = '[fast-jev-compaction stub]';
 
 /**
- * The ids of calls an earlier compaction already cut: the result carries this
- * plugin's truncation note, and the input is either already cut to
+ * Whether `text` is one `truncatedResultText` could have produced: a note at
+ * the very end, behind at most a head (truncated) or a short result (stubbed).
+ * A tool output that merely quotes a note is not.
+ */
+function isCutResult(text: string, headChars: number): boolean {
+  if (text.endsWith(STUB_NOTE)) return text.length <= headChars + 121 + STUB_NOTE.length;
+  const note = TRUNCATION_NOTE.exec(text);
+  return note !== null && note.index <= headChars + 1;
+}
+
+/**
+ * The ids of calls an earlier compaction already cut: the result is one this
+ * plugin cut (`isCutResult`), and the input is either already cut to
  * `input_head` and `note` or short enough that stubbing leaves it as it is.
  */
 export function alreadyStubbed(
@@ -168,7 +215,7 @@ export function alreadyStubbed(
   }
   const ids = new Set<string>();
   for (const call of calls) {
-    if (!RESULT_NOTE.test(results.get(call.tool_use_id) ?? '')) continue;
+    if (!isCutResult(results.get(call.tool_use_id) ?? '', headChars)) continue;
     const keys = Object.keys(call.input).sort().join(',');
     if (keys === 'input_head,note' || truncatedInput(call.input, headChars) === call.input) {
       ids.add(call.id);
@@ -177,8 +224,10 @@ export function alreadyStubbed(
   return ids;
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
+function truncatedResultText(text: string, isError: boolean, headChars: number, stub = false): string {
+  if (text.length <= headChars + 120) {
+    return stub && !isCutResult(text, headChars) ? `${text}${text ? '\n' : ''}${STUB_NOTE}` : text;
+  }
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
   return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
@@ -231,6 +280,7 @@ export function applyDecisions(
           tool.text ?? '',
           tool.isError ?? false,
           headChars,
+          action === 'stub_call' && tool.text !== undefined,
         );
         const input = action === 'stub_call' ? truncatedInput(tool.input, headChars) : tool.input;
         if ((tool.text ?? '') === text && input === tool.input) return tool;
@@ -248,7 +298,7 @@ export function applyDecisions(
       .map((result) => {
         const action = actions.get(result.tool_use_id);
         if (action !== 'drop_result' && action !== 'stub_call') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const text = truncatedResultText(result.text, result.isError ?? false, headChars, action === 'stub_call');
         return text === result.text
           ? result
           : {
@@ -282,7 +332,13 @@ export function applyDecisions(
   return kept;
 }
 
-/** Characters of text, tool input and tool output a message holds. */
+/** A result's characters without a stub note, so a stub never counts as larger than what it replaced. */
+function resultChars(text: string): number {
+  if (!text.endsWith(STUB_NOTE)) return text.length;
+  return Math.max(0, text.length - STUB_NOTE.length - 1);
+}
+
+/** Characters of text, tool input and tool output a message holds; a stub note is not counted. */
 export function messageChars(message: Message): number {
   let total = message.text.length;
   for (const tool of message.toolUses) {
@@ -292,7 +348,7 @@ export function messageChars(message: Message): number {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) total += result.text.length;
+  for (const result of message.toolResults ?? []) total += resultChars(result.text);
   return total;
 }
 
@@ -305,12 +361,85 @@ function count(decisions: readonly CallDecision[], reason: CallDecision['reason'
   return decisions.filter((decision) => decision.reason === reason).length;
 }
 
+type StateGroup = { state: ReturnType<typeof fitState>; calls: ToolCall[] };
+
+function tooLarge(error: unknown): boolean {
+  return String((error as Error)?.message).startsWith('history too large for Jev');
+}
+
+/**
+ * One state for all candidates when the history fits `maxStateTokens`. When it
+ * does not (long sessions), the candidates are split into contiguous windows,
+ * halved until each window's state fits: a window's state keeps the goal, the
+ * first message, the pinned newest messages and its own messages in full, and
+ * leaves the rest of the history out. Relevance of an old call depends mostly
+ * on the goal and the recent turns, which every window carries. A call whose
+ * window cannot fit even alone is returned in `unasked`; it gets no answer and
+ * therefore stays, like any call Jev was not asked about.
+ */
+export function stateGroups(
+  messages: readonly Message[],
+  calls: readonly ToolCall[],
+  candidates: readonly ToolCall[],
+  options: ResolvedCompactOptions,
+): { groups: StateGroup[]; unasked: ToolCall[]; stage: string } {
+  try {
+    const state = fitState(messages, calls, options);
+    return { groups: [{ state, calls: [...candidates] }], unasked: [], stage: state.stage };
+  } catch (error) {
+    if (!tooLarge(error)) throw error;
+  }
+  const windowOptions = { ...options, goal: options.goal || goalFromMessages(messages) };
+  // Every window's state holds at least the goal and the pinned messages and
+  // calls; when those alone do not fit, no window can, so stop before trying.
+  const pinnedOnly = messages.map((message, i) =>
+    isPinned(i, messages.length, options.preserveRecentMessages) ? message : { ...message, text: '' },
+  );
+  try {
+    fitState(pinnedOnly, calls.filter((call) => call.pinned), windowOptions);
+  } catch (error) {
+    if (!tooLarge(error)) throw error;
+    return { groups: [], unasked: [...candidates], stage: `windows:0 unasked:${candidates.length}` };
+  }
+  const groups: StateGroup[] = [];
+  const unasked: ToolCall[] = [];
+  const fit = (group: ToolCall[]): void => {
+    const lo = Math.min(...group.map((call) => call.callIndex));
+    const hi = Math.max(...group.map((call) => call.resultIndex));
+    const inWindow = new Set(group.map((call) => call.id));
+    const view = messages.map((message, i) =>
+      (i >= lo && i <= hi) || isPinned(i, messages.length, options.preserveRecentMessages)
+        ? message
+        : { ...message, text: '' },
+    );
+    try {
+      const state = fitState(view, calls.filter((call) => call.pinned || inWindow.has(call.id)), windowOptions);
+      groups.push({ state, calls: group });
+    } catch (error) {
+      if (!tooLarge(error)) throw error;
+      if (group.length === 1) {
+        unasked.push(group[0]!);
+        return;
+      }
+      const half = Math.ceil(group.length / 2);
+      fit(group.slice(0, half));
+      fit(group.slice(half));
+    }
+  };
+  const half = Math.ceil(candidates.length / 2);
+  fit(candidates.slice(0, half));
+  if (candidates.length > half) fit(candidates.slice(half));
+  const stage = `windows:${groups.length}${unasked.length > 0 ? ` unasked:${unasked.length}` : ''}`;
+  return { groups, unasked, stage };
+}
+
 /**
  * Compacts a transcript by asking Jev, for every tool call outside the pinned
  * first and newest messages, whether the call and whether its result must
  * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
- * sent as state with every batch of questions. Throws when Jev fails or the
- * history cannot be fitted; the caller decides whether to fall back.
+ * sent as state with every batch of questions; when it cannot be fitted, the
+ * calls are asked in windows (see `stateGroups`). Throws when Jev fails; the
+ * caller decides whether to fall back.
  */
 export async function compact(
   messages: readonly Message[],
@@ -324,15 +453,16 @@ export async function compact(
   const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
 
   let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
-  let batches: ToolCall[][] = [];
+  let requests = 0;
   const answers = new Map<string, CallAnswer>();
   if (candidates.length > 0) {
-    const state = fitState(messages, calls, resolved);
-    fitted = state;
-    batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
+    const { groups, stage } = stateGroups(messages, calls, candidates, resolved);
+    fitted = { tokens: Math.max(0, ...groups.map((group) => group.state.tokens)), stage };
+    const jobs = groups.flatMap((group) =>
+      batchCalls(group.calls, group.state.tokens, resolved).map((batch) => ({ state: group.state.state, batch })),
     );
+    requests = jobs.length;
+    const answered = await inPool(jobs, JEV_CONCURRENCY, (job) => askOnce(asker, job.state, job.batch));
     for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
   }
 
@@ -368,7 +498,7 @@ export async function compact(
       pinned: count(decisions, 'pinned'),
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,
-      requests: batches.length,
+      requests,
       ms: Date.now() - started,
     },
   };

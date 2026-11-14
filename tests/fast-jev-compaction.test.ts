@@ -447,6 +447,115 @@ describe('compact', () => {
     expect(reductionRatio(output)).toBe(0);
   });
 
+  /** `count` Bash calls with 1000-character results, ids `u<from>` onward. */
+  function bashCalls(count: number, from = 0): Message[] {
+    const messages: Message[] = [];
+    for (let i = from; i < from + count; i += 1) {
+      const out = `line ${i} `.repeat(200).slice(0, 1000);
+      messages.push(
+        call(`u${i}`, 'Bash', { command: `cd /repo/packages/pkg-${i} && npm run check -- --verbose`, description: `Check package ${i}` }, out),
+        result(`u${i}`, out),
+      );
+    }
+    return messages;
+  }
+
+  it('compacts a history with more calls than the state can describe', async () => {
+    const messages = [message('user', 'Run the build checks across every package.'), ...bashCalls(900), message('assistant', 'All checks ran.')];
+    const output = await compact(messages, fakeJev(() => 0.1));
+    expect(output.stats.stateTokens).toBeLessThanOrEqual(25_000);
+    expect(output.stats.stateStage).toMatch(/^windows:\d+$/);
+    expect(reductionRatio(output)).toBeGreaterThanOrEqual(0.25);
+  });
+
+  it('keeps compacting as stubs and new calls accumulate across passes', async () => {
+    const options = { dropCalls: false };
+    const start = [message('user', 'Run the build checks across every package.'), ...bashCalls(500)];
+    const first = await compact([...start, message('assistant', 'Half done.')], fakeJev(() => 0.1), options);
+    expect(first.stats.callsStubbed).toBeGreaterThan(400);
+    const stubbedIds = new Set(
+      first.messages.flatMap((m) => m.toolUses).filter((t) => /truncated \d+ chars of this tool result/.test(t.text ?? '')).map((t) => t.tool_use_id),
+    );
+    expect(stubbedIds.size).toBe(first.stats.callsStubbed);
+
+    const grown = [...first.messages, ...bashCalls(300, 500), message('assistant', 'All checks ran.')];
+    const second = await compact(grown, fakeJev(() => 0.1), options);
+    expect(second.stats.stubsDropped).toBe(first.stats.callsStubbed);
+    const left = new Set(second.messages.flatMap((m) => m.toolUses).map((t) => t.tool_use_id));
+    expect([...stubbedIds].filter((id) => left.has(id))).toEqual([]);
+  });
+
+  it('marks a stub of a short result, so the next pass deletes it', async () => {
+    const options = { preserveRecentMessages: 1, dropCalls: false };
+    const short: Message[] = [
+      message('user', 'go'),
+      call('s1', 'Read', { file_path: 'b.ts' }, 'ok'),
+      result('s1', 'ok'),
+      message('assistant', 'done'),
+    ];
+    const first = await compact(short, fakeJev(() => 0.1), options);
+    expect(first.decisions.map((d) => d.reason)).toEqual(['call_stubbed']);
+    const second = await compact(first.messages, fakeJev(() => 0.1), options);
+    expect(second.decisions.map((d) => d.reason)).toEqual(['stub_dropped']);
+    expect(second.messages.map((m) => m.text)).toEqual(['go', 'done']);
+  });
+
+  it('never counts a stub as larger than the result it replaced', async () => {
+    const messages: Message[] = [message('user', 'go')];
+    for (let i = 0; i < 300; i += 1) messages.push(call(`s${i}`, 'Bash', { command: 'true' }, 'ok'), result(`s${i}`, 'ok'));
+    messages.push(message('assistant', 'done'));
+    const output = await compact(messages, fakeJev(() => 0.1), { dropCalls: false });
+    expect(output.stats.callsStubbed).toBe(output.stats.calls - output.stats.pinned);
+    expect(output.messages[1]!.toolUses[0]!.text).toMatch(/\[fast-jev-compaction stub\]$/);
+    // Nothing was cut, so nothing was gained, and nothing was lost either.
+    expect(reductionRatio(output)).toBe(0);
+  });
+
+  it('does not take a tool output that quotes a note for a stub', async () => {
+    const outputs = [
+      "const STUB_NOTE = '[fast-jev-compaction stub]';",
+      `${'x'.repeat(3000)}\n[fast-jev-compaction truncated 123 chars of this tool result; re-run the tool if needed]\n${'y'.repeat(3000)}`,
+      `${'x'.repeat(3000)}\n[fast-jev-compaction stub]`,
+    ];
+    for (const text of outputs) {
+      const messages = [message('user', 'go'), call('q', 'Read', { file_path: 'src/compact.ts' }, text), result('q', text), message('assistant', 'done')];
+      const output = await compact(messages, fakeJev(() => 0.1), { dropCalls: false, preserveRecentMessages: 1 });
+      expect(output.decisions.map((d) => d.reason)).toEqual(['call_stubbed']);
+    }
+  });
+
+  it('caps concurrent requests and retries a 429 or 5xx once', async () => {
+    const messages = [message('user', 'go')];
+    for (let i = 0; i < 60; i += 1) messages.push(call(`r${i}`, 'Bash', { command: `ls ${i}` }, 'x'.repeat(500)), result(`r${i}`, 'x'.repeat(500)));
+    messages.push(message('assistant', 'done'));
+    const options = { preserveRecentMessages: 1, maxRequestTokens: 0 };
+    const stateTokens = fitState(messages, collectToolCalls(messages, 1), { ...fit, goal: '', preserveRecentMessages: 1 }).tokens;
+    options.maxRequestTokens = stateTokens + 200;
+    let inFlight = 0;
+    let most = 0;
+    let calls = 0;
+    const busy = (status: number): JevAsker => ({
+      async ask(state, questions) {
+        calls += 1;
+        const first = calls === 1;
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        if (first) throw new Error(`Jev request failed (${status}): busy`);
+        return fakeJev(() => 0.1).ask(state, questions);
+      },
+    });
+    const output = await compact(messages, busy(503), options);
+    expect(output.stats.requests).toBeGreaterThan(8);
+    expect(calls).toBe(output.stats.requests + 1);
+    expect(most).toBeLessThanOrEqual(8);
+    expect(output.stats.callsDropped).toBe(60);
+
+    calls = 0;
+    await expect(compact(messages, busy(400), options)).rejects.toThrow(/failed \(400\)/);
+  });
+
   it('rejects malformed answers', async () => {
     const broken: JevAsker = {
       ask: async () => ({ answers: { call_t1: { noul: 0.5 } } }),
@@ -497,5 +606,80 @@ describe('HTTP client', () => {
     await expect(
       compactMessages(transcript(), { apiKey: '', preserveRecentMessages: 1 }),
     ).rejects.toThrow(/TYPESAFE_API_KEY/);
+  });
+});
+
+describe('windowed states when the history does not fit', () => {
+  function long(n: number): Message[] {
+    const out: Message[] = [message('user', 'Fix the failing build; never touch src/generated.')];
+    for (let i = 0; i < n; i++) {
+      out.push(message('assistant', `Step ${i}: ${'checking the next module and its callers '.repeat(6)}`));
+      out.push(call(`w${i}`, 'Bash', { command: `npm test -- module${i}` }, ''));
+      out.push(result(`w${i}`, `module${i}: 3 passed, 1 failed (exit code 1)\n${'x'.repeat(400)}`));
+    }
+    out.push(message('user', 'go on'));
+    return out;
+  }
+  const options = { maxStateTokens: 3_000, maxRequestTokens: 6_000, preserveRecentMessages: 2 };
+
+  it('splits into windows that each fit, and every candidate is asked', async () => {
+    const messages = long(400);
+    const calls = collectToolCalls(messages, 2);
+    expect(() => fitState(messages, calls, resolveOptions(options))).toThrow(/history too large/);
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), options);
+    expect(out.stats.stateStage).toMatch(/^windows:\d+$/);
+    expect(out.stats.stateTokens).toBeLessThanOrEqual(options.maxStateTokens);
+    const asked = new Set(seen.flatMap((s) => s.questions).filter((q) => q.startsWith('call_')));
+    expect(asked.size).toBe(calls.filter((c) => !c.pinned).length);
+    expect(out.stats.requests).toBe(seen.length);
+  });
+
+  it('keeps a call that no window can fit, instead of throwing', async () => {
+    const messages = long(5);
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), { ...options, maxStateTokens: 200, goal: 'g'.repeat(5_000) });
+    expect(seen.length).toBe(0);
+    expect(out.stats.stateStage).toMatch(/unasked:\d+/);
+    expect(out.decisions.every((d) => d.action === 'keep')).toBe(true);
+    expect(out.messages).toEqual(messages);
+  });
+
+  it('gives up at once when the goal and pinned messages alone do not fit', async () => {
+    const plain = long(300);
+    let reads = 0;
+    const messages = new Proxy(plain, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), { ...options, goal: 'g '.repeat(10_000) });
+    expect(seen).toHaveLength(0);
+    expect(out.stats.stateStage).toBe(`windows:0 unasked:${collectToolCalls(plain, 2).filter((c) => !c.pinned).length}`);
+    expect(out.messages).toEqual(plain);
+    // A fixed number of passes over the history, not one per window tried.
+    expect(reads).toBeLessThan(20 * plain.length);
+  });
+
+  it('keeps the calls of a window too large to fit alone, and asks about the rest', async () => {
+    const messages = long(20);
+    // A tool name is never shortened, so this call's window cannot fit by itself.
+    const huge = 'Z'.repeat(6_000);
+    messages[3 * 7 + 2]!.toolUses[0]!.tool = huge;
+    const calls = collectToolCalls(messages, 2);
+    const big = calls.find((c) => c.tool === huge)!;
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), { ...options, maxStateTokens: 800, dropCalls: false });
+    expect(out.stats.stateStage).toMatch(/^windows:\d+ unasked:1$/);
+    expect(out.stats.stateTokens).toBeLessThanOrEqual(800);
+    const asked = new Set(seen.flatMap((s) => s.questions));
+    expect(asked.has(`call_${big.id}`)).toBe(false);
+    expect(out.decisions.find((d) => d.id === big.id)).toMatchObject({ action: 'keep', reason: 'kept' });
+    expect(out.messages.some((m) => m.toolUses.some((t) => t.tool === huge && t.text === ''))).toBe(true);
+    const others = out.decisions.filter((d) => d.id !== big.id && d.reason !== 'pinned');
+    expect(others.length).toBe(calls.filter((c) => !c.pinned).length - 1);
+    expect(others.every((d) => asked.has(`call_${d.id}`) && d.action === 'stub_call')).toBe(true);
   });
 });
