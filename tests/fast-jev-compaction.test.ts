@@ -613,6 +613,24 @@ describe('windowed states when the history does not fit', () => {
     expect(out.messages).toEqual(messages);
   });
 
+  it('gives up at once when the goal and pinned messages alone do not fit', async () => {
+    const plain = long(300);
+    let reads = 0;
+    const messages = new Proxy(plain, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const seen: Seen[] = [];
+    const out = await compact(messages, fakeJev(() => 0.1, seen), { ...options, goal: 'g '.repeat(10_000) });
+    expect(seen).toHaveLength(0);
+    expect(out.stats.stateStage).toBe(`windows:0 unasked:${collectToolCalls(plain, 2).filter((c) => !c.pinned).length}`);
+    expect(out.messages).toEqual(plain);
+    // A fixed number of passes over the history, not one per window tried.
+    expect(reads).toBeLessThan(20 * plain.length);
+  });
+
   it('keeps the calls of a window too large to fit alone, and asks about the rest', async () => {
     const messages = long(20);
     // A tool name is never shortened, so this call's window cannot fit by itself.

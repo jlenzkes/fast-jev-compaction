@@ -357,6 +357,17 @@ export function stateGroups(
     if (!tooLarge(error)) throw error;
   }
   const windowOptions = { ...options, goal: options.goal || goalFromMessages(messages) };
+  // Every window's state holds at least the goal and the pinned messages and
+  // calls; when those alone do not fit, no window can, so stop before trying.
+  const pinnedOnly = messages.map((message, i) =>
+    isPinned(i, messages.length, options.preserveRecentMessages) ? message : { ...message, text: '' },
+  );
+  try {
+    fitState(pinnedOnly, calls.filter((call) => call.pinned), windowOptions);
+  } catch (error) {
+    if (!tooLarge(error)) throw error;
+    return { groups: [], unasked: [...candidates], stage: `windows:0 unasked:${candidates.length}` };
+  }
   const groups: StateGroup[] = [];
   const unasked: ToolCall[] = [];
   const fit = (group: ToolCall[]): void => {
