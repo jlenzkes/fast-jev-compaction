@@ -577,6 +577,24 @@ function newestSummary(messages: readonly SessionMessage[]): unknown {
   };
 }
 
+/**
+ * Every message of a list, for the debug log: role, length and hash of its
+ * text (never the text), tool ids, whether it has a handle, and the first line
+ * of a message the plugin wrote (a put-back's header or a receipt's first
+ * line, both the plugin's own words).
+ */
+function listSummary(messages: readonly SessionMessage[]): unknown[] {
+  return messages.map((m) => ({
+    role: m.role,
+    chars: m.text.length,
+    hash: fnv1a(m.text),
+    ...(m.toolUses.length ? { uses: m.toolUses.map((t) => t.tool_use_id) } : {}),
+    ...(m.toolResults?.length ? { results: m.toolResults.map((r) => r.tool_use_id) } : {}),
+    handle: m.handle !== undefined,
+    ...(m.text.startsWith('[fast-jev-compaction ') ? { plugin: m.text.split('\n')[0]!.slice(0, 160) } : {}),
+  }));
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -680,6 +698,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       placed: tally('placed'),
       waiting: tally('waiting'),
       durable: ledger?.durable ?? null,
+      seqs: entries.map((d, n) => ({ seq: d.seq, outcome: outcomes[n]!.kind })),
+      messages: listSummary(event.messages),
     });
     // On a fallback the built-in summary is handed the history with the
     // deliveries put back and the earlier receipts out, so the summarizer reads
@@ -762,6 +782,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
         )} smaller as returned; ${summarize(result).replace(/^-?\d+% reduction; /, '')})`,
       );
       if (ledger) await ledgers.settle(ledgerHost($), entries, outcomes, mode, out, record);
+      await debugLog($, {
+        ev: 'session.compact.returned',
+        registration,
+        trigger: event.trigger,
+        recordedAfter: ledger ? (await ledgers.read(ledgerHost($))).entries.map((d) => d.seq) : null,
+        messages: listSummary(returned),
+      });
       return { messages: returned };
     } catch (error) {
       notify(

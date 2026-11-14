@@ -252,7 +252,8 @@ not established, so the receipt counts it as not carried. The record of
 delivered prompts is kept per session in the plugin's own store and survives
 a plugin reload; when the store cannot be used, it lives in memory and the
 receipt says that prompts delivered before a reload may be missing. A
-receipt replaces the previous one at the next compaction, and Jev never sees
+receipt is taken out at the next compaction (and replaced when that one keeps
+messages; a built-in summary writes its own pointer instead), and Jev never sees
 a receipt. Set the `receipt` option to `false` to leave it out.
 
 ## Repository layout, and other harnesses
