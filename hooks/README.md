@@ -68,6 +68,7 @@ The plugin declares these `userConfig` values in
 | `reportHeadChars` | `400` |
 | `taskHeadChars` | `200` |
 | `hostLineChars` | `120` |
+| `unconfirmedBudget` | `20000` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -119,24 +120,38 @@ does. In short:
   between a tool call and its result); one whose message went back whole is
   the host's.
 - The sender comes from the record's `origin.kind` only. A prompt with none is
-  the user's; an `isMeta` record with none is the host's. A prompt gets the
-  user's standing only if `prompt.submit` was seen accepting the same text (a
-  hash kept in memory); otherwise its first line says the plugin did not see
-  it arrive.
-- What is carried whole is decided once per compaction. Prompts the user
-  typed go back whole and uncounted. Reports go back whole, newest first, up to
-  `putBackBudget` characters, the rest as their first `reportHeadChars`. A
-  task notice goes back as its summary, status and output file. Host messages
-  go back as their first line. Each put-back's first line is the plugin's and
-  names its transcript line; every delivered line is indented two spaces.
-- No put-backs, with the reason in the note and the toast, when: the file is
-  missing; a listed handle is not in it; a line mid-file does not parse; the
-  reader's output was cut or it failed; or a window with a rebuilt tool round
-  shows no hidden record at all. A built-in fallback, a subagent's compaction
-  and a compaction that rebuilds nothing read nothing.
+  the user's; an `isMeta` record with none is the host's.
+- A prompt gets the user's standing only if `prompt.submit` accepted the same
+  text while a turn ran (a hash kept in memory). Each such prompt vouches for
+  one record, the earliest, and stays bound to it.
+- Otherwise its first line leads with "Attributed to the user by the
+  transcript" and says not to take it as the user's instruction or approval
+  until the user confirms it.
+- What is carried whole is decided once per compaction:
+  - The user's confirmed prompts go back whole and uncounted.
+  - Unconfirmed user-attributed text goes back whole, oldest first, up to
+    `unconfirmedBudget` characters, then as a head.
+  - Reports go back whole, newest first, up to `putBackBudget` characters, the
+    rest as `reportHeadChars` of their own words (the host's hand-back frame
+    removed by its structure).
+  - Task notices go back as one list, a line each (status and summary, at most
+    `taskHeadChars`), after the last message one sat beside.
+  - Host messages go back as one line, the label and what follows it.
+- Each put-back's first line is the plugin's and names its transcript line;
+  every delivered line is indented two spaces.
+- No put-backs, with the reason in the note and the toast, when:
+  - the file is missing;
+  - a listed handle is not in it as a record's own uuid;
+  - a line mid-file does not parse;
+  - the reader's output was cut, or the reader failed;
+  - a window with a rebuilt tool round shows no hidden record at all.
+- A built-in fallback, a subagent's compaction and a compaction that rebuilds
+  nothing read nothing. A subagent's compaction gets no note.
+- Windows PowerShell is started by its full path under `%SystemRoot%`.
 
 The toast counts what it can see: `kept N/M listed messages (R rebuilt or
-deleted; W put back whole, S shortened; H left to the host), no summary (X%
+deleted; put back: U of the user's prompts whole, W others whole, S shortened,
+T task notice(s) in one list; H left to the host), no summary (X%
 smaller as returned, Y% before put-backs; put-backs C chars, Z% of the
 saving; transcript read by <reader> in T ms; ...)`. If the put-backs would
 leave less than `minReductionRatio`, the hook falls back to the built-in

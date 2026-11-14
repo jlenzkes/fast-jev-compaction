@@ -12,6 +12,8 @@ import { compact, messageChars, reductionRatio, resolveOptions } from '../src/co
 import { goalFromMessages } from '../src/state.js';
 import {
   type Carry,
+  classOf,
+  Confirmations,
   decideCarry,
   fnv1a,
   insertPutBacks,
@@ -20,6 +22,7 @@ import {
   putBackText,
   sha256,
   submitKind,
+  taskListText,
   USER_KINDS,
   withoutPluginMessages,
 } from './deliveries.js';
@@ -73,6 +76,7 @@ export const PUT_BACK_DEFAULTS: PutBackOptions = {
   reportHeadChars: 400,
   taskHeadChars: 200,
   hostLineChars: 120,
+  unconfirmedBudget: 20_000,
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -115,6 +119,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     reportHeadChars: optionNumber(options, 'reportHeadChars', PUT_BACK_DEFAULTS.reportHeadChars),
     taskHeadChars: optionNumber(options, 'taskHeadChars', PUT_BACK_DEFAULTS.taskHeadChars),
     hostLineChars: optionNumber(options, 'hostLineChars', PUT_BACK_DEFAULTS.hostLineChars),
+    unconfirmedBudget: optionNumber(options, 'unconfirmedBudget', PUT_BACK_DEFAULTS.unconfirmedBudget),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -404,16 +409,17 @@ function listSummary(messages: readonly SessionMessage[]): unknown[] {
   }));
 }
 
-/** The user's own prompts `prompt.submit` saw accepted, kept in memory, newest last. */
-const SEEN_MAX = 2000;
-
 function chars(messages: readonly SessionMessage[]): number {
   return messages.reduce((sum, m) => sum + messageChars(m as unknown as Message), 0);
 }
 
 export type PutBackReport = {
   placed: { listedIndex: number; line: number; text: string }[];
+  /** Put back whole: the user's confirmed prompts, and everything else. */
+  wholeUser: number;
   whole: number;
+  /** Task notifications carried as lines of the one task list. */
+  tasks: number;
   shortened: { found: Found; confirmed: boolean; carry: Carry }[];
   leftToHost: number;
   unlisted: number;
@@ -424,32 +430,44 @@ export type PutBackReport = {
   via?: string;
 };
 
+export function emptyReport(): PutBackReport {
+  return { placed: [], wholeUser: 0, whole: 0, tasks: 0, shortened: [], leftToHost: 0, unlisted: 0, oversize: [] };
+}
+
 /**
  * What to put back, from a window the reader returned: each delivery whose
  * neighbour went back without its handle (rebuilt or deleted), carried as
- * `decideCarry` says. Stands down, reporting why, when a listed handle is not
- * in the file, or when a window with a rebuilt tool round holds no hidden
- * record at all (the format may have changed; and if it has not, there was
- * nothing to put back).
+ * `decideCarry` says; task notifications as one list after the last of their
+ * neighbours. User-attributed records claim confirmations in transcript order,
+ * all of them, whatever their fate, so a later record cannot take an entry an
+ * earlier one owns. Stands down, reporting why, when a listed handle is not in
+ * the file, or when a window with a rebuilt tool round holds no hidden record
+ * at all (the format may have changed; and if it has not, there was nothing to
+ * put back).
  */
 export async function planPutBacks(
   listed: readonly SessionMessage[],
   rebuilt: ReadonlySet<string>,
   w: Window,
-  seen: ReadonlySet<string>,
+  confirmations: Confirmations,
   options: PutBackOptions,
 ): Promise<PutBackReport> {
   const handles = listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string');
-  const report: PutBackReport = { placed: [], whole: 0, shortened: [], leftToHost: 0, unlisted: 0, oversize: [] };
+  const report = emptyReport();
   const missing = handles.filter((h) => !w.found.has(h));
   if (missing.length > 0) return { ...report, stoodDown: `${missing.length} listed message(s) are not in the transcript file` };
   const rebuiltToolRound = listed.some((m) => m.handle !== undefined && rebuilt.has(m.handle) && (m.toolResults?.length ?? 0) > 0);
   if (w.hidden === 0 && rebuiltToolRound) {
     return { ...report, stoodDown: 'the transcript shows no hidden record since the last compaction, though tool calls ran; its format may have changed' };
   }
-  const index = new Map(handles.map((h, i) => [h, listed.findIndex((m) => m.handle === h)] as const));
+  const index = new Map(handles.map((h) => [h, listed.findIndex((m) => m.handle === h)] as const));
   const handleSet = new Set(handles);
+  const confirmed = new Map<string, boolean>();
+  for (const d of [...w.deliveries].sort((x, y) => x.line - y.line)) {
+    if (USER_KINDS.has(d.kind)) confirmed.set(d.uuid, confirmations.confirm(d.uuid, await sha256(d.body)));
+  }
   const acted: { found: Found; confirmed: boolean; listedIndex: number }[] = [];
+  const tasks: { found: Found; listedIndex: number }[] = [];
   for (const d of w.deliveries) {
     const nb = neighbourOf(d, w, handleSet);
     if ('summary' in nb) continue;
@@ -461,15 +479,23 @@ export async function planPutBacks(
       report.leftToHost++;
       continue;
     }
-    const confirmed = USER_KINDS.has(d.kind) && seen.has(await sha256(d.body));
-    acted.push({ found: d, confirmed, listedIndex: index.get(nb.at)! });
+    if (classOf(d.kind) === 'task') tasks.push({ found: d, listedIndex: index.get(nb.at)! });
+    else acted.push({ found: d, confirmed: confirmed.get(d.uuid) === true, listedIndex: index.get(nb.at)! });
   }
   const carry = decideCarry(acted, options);
   acted.forEach((a, i) => {
     report.placed.push({ listedIndex: a.listedIndex, line: a.found.line, text: putBackText(a.found, a.confirmed, carry[i]!) });
-    if (carry[i]!.mode === 'whole') report.whole++;
-    else report.shortened.push({ found: a.found, confirmed: a.confirmed, carry: carry[i]! });
+    if (carry[i]!.mode !== 'whole') report.shortened.push({ found: a.found, confirmed: a.confirmed, carry: carry[i]! });
+    else if (classOf(a.found.kind) === 'user' && a.confirmed) report.wholeUser++;
+    else report.whole++;
   });
+  if (tasks.length > 0) {
+    // One list, after the last message a notice sat beside: every notice it
+    // lists had arrived by then, and none is put before its own arrival.
+    const last = tasks.reduce((x, y) => (y.listedIndex > x.listedIndex || (y.listedIndex === x.listedIndex && y.found.line > x.found.line) ? y : x));
+    report.placed.push({ listedIndex: last.listedIndex, line: last.found.line, text: taskListText(tasks.map((t) => t.found), options) });
+    report.tasks = tasks.length;
+  }
   report.oversize = w.oversize.filter((x) => x.delivery && x.line > w.boundary);
   report.since = w.start;
   return report;
@@ -484,18 +510,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
   // again each NUDGE_STEP points, so the user picks the moment to /compact.
   let cannotCompact = false;
   const nudges: NudgeState = { nudgedAt: Number.NEGATIVE_INFINITY };
-  // The one thing the plugin remembers, in memory only: hashes of the prompts
-  // prompt.submit accepted from the user. A transcript record attributed to the
-  // user has the user's standing only when its text is among them.
-  const seen = new Set<string>();
+  // The one thing the plugin remembers, in memory only: an entry per prompt
+  // prompt.submit accepted from the user while a turn ran. Each confirms one
+  // transcript record with the same text (Confirmations).
+  const confirmations = new Confirmations();
 
   on('prompt.submit', async ($, event, next) => {
     const entered = await next(event);
-    if (entered.drop === undefined && USER_KINDS.has(submitKind(entered.origin))) {
-      const hash = await sha256(entered.text);
-      seen.delete(hash);
-      seen.add(hash);
-      if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value as string);
+    if (event.turnId !== undefined && entered.drop === undefined && USER_KINDS.has(submitKind(entered.origin))) {
+      confirmations.add(await sha256(entered.text));
     }
     return entered;
   });
@@ -520,26 +543,30 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const kept = new Set(messages.map((m) => m.handle).filter((h): h is string => typeof h === 'string'));
       const rebuilt = new Set(listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string' && !kept.has(h)));
       const transcript = await transcriptPath($);
-      let report: PutBackReport = { placed: [], whole: 0, shortened: [], leftToHost: 0, unlisted: 0, oversize: [] };
+      let report = emptyReport();
       if (event.agentId !== undefined) {
         // A subagent's own transcript is not the session file this reads.
       } else if (rebuilt.size > 0) {
         if (!transcript) report.stoodDown = 'the transcript file was not found';
         else {
           try {
-            const windows = (await $.env.get('OS')) === 'Windows_NT';
+            // Windows PowerShell by its full path, so no PATH entry or file in the
+            // working directory decides what runs; the bare name only when absent.
+            const root = (await $.env.get('OS')) === 'Windows_NT' ? (await $.env.get('SystemRoot')) || 'C:\\Windows' : undefined;
+            const full = root ? `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : undefined;
+            const shell = full === undefined ? undefined : (await $.fs.exists(full)) ? full : 'powershell';
             const read = await readWindow(
               {
                 stat: (path) => $.fs.stat(path),
                 read: (path) => $.fs.read(path),
                 run: (argv, init) => $.process.run(argv, init),
               },
-              windows,
+              shell,
               transcript,
               listed.map((m) => m.handle).filter((h): h is string => typeof h === 'string'),
               () => Date.now(),
             );
-            report = { ...(await planPutBacks(listed, rebuilt, read.window, seen, config)), readerMs: read.ms, via: read.via };
+            report = { ...(await planPutBacks(listed, rebuilt, read.window, confirmations, config)), readerMs: read.ms, via: read.via };
           } catch (error) {
             report.stoodDown = `the transcript could not be read (${error instanceof Error ? error.message : String(error)})`;
           }
@@ -547,7 +574,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       let out = insertPutBacks(messages, sourceIndices(listed, messages), report.placed);
       const putBackChars = chars(out) - chars(messages);
-      if (config.note) {
+      // A subagent's compaction gets no note: the transcript it would name is the main session's.
+      if (config.note && event.agentId === undefined) {
         out = [
           ...out,
           {
@@ -562,7 +590,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
               callsDeleted: result.stats.callsDropped + result.stats.stubsDropped,
               ...(report.since !== undefined ? { since: report.since } : {}),
               ...(report.stoodDown !== undefined ? { stoodDown: report.stoodDown } : {}),
+              wholeUser: report.wholeUser,
               whole: report.whole,
+              tasks: report.tasks,
               shortened: report.shortened,
               leftToHost: report.leftToHost,
               unlisted: report.unlisted,
@@ -577,7 +607,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const ratio = before > 0 ? 1 - chars(out) / before : 0;
       const parts = [
         `${rebuilt.size} rebuilt or deleted`,
-        report.placed.length > 0 ? `${report.whole} put back whole, ${report.shortened.length} shortened` : '',
+        report.placed.length > 0
+          ? `put back: ${report.wholeUser} of the user's prompts whole, ${report.whole} others whole, ${report.shortened.length} shortened${report.tasks > 0 ? `, ${report.tasks} task notice(s) in one list` : ''}`
+          : '',
         report.leftToHost > 0 ? `${report.leftToHost} left to the host` : '',
         report.unlisted > 0 ? `${report.unlisted} beside messages not listed` : '',
         report.stoodDown ? `put-backs stood down: ${report.stoodDown}` : '',
@@ -592,6 +624,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         rebuilt: rebuilt.size,
         placed: report.placed.map((p) => p.line),
         shortened: report.shortened.map((s) => s.found.line),
+        tasks: report.tasks,
         leftToHost: report.leftToHost,
         unlisted: report.unlisted,
         stoodDown: report.stoodDown ?? null,

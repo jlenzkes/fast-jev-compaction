@@ -221,15 +221,21 @@ as the transcript records it, and every delivered line is indented two
 spaces, so nothing a delivery says can read as the plugin's line or as your
 words.
 
-Your own prompts always go back whole. Reports from other sessions go back
-whole up to a budget, newest first, and the rest as their first lines. A task
-notice goes back as its summary and output file, and hook feedback as its first
-line. A shortened one keeps its transcript line, where the whole text still
-is. A prompt counts as yours only if the plugin also saw it arrive; otherwise
-its first line says the transcript attributes it to you and the plugin did not
-see it arrive. The defaults (`putBackBudget` 15000, `reportHeadChars` 400,
-`taskHeadChars` 200, `hostLineChars` 120) kept put-backs at 5% to 11% of what
-each compaction saved in a real session replayed offline.
+Your own prompts go back whole. Reports from other sessions go back whole up
+to a budget, newest first, and the rest as their first lines (the report's own
+words, not the host's hand-back sentence). Task notices go back as one list, a
+line each with the task's status and summary. Hook feedback goes back as one
+line. A shortened one names its transcript line, where the whole text still is.
+
+A prompt counts as yours only if the plugin also saw you send it while the
+agent worked, and each prompt it saw vouches for one transcript record only.
+Anything else the transcript attributes to you is put back under a first line
+that says so, and that it is not your instruction or approval until you confirm
+it; past 20,000 characters in one compaction, such text goes back as a head.
+
+The defaults (`putBackBudget` 15000, `reportHeadChars` 400, `taskHeadChars`
+200, `hostLineChars` 120, `unconfirmedBudget` 20000) kept put-backs at 3% to 8%
+of what each compaction saved in a real session replayed offline.
 
 With the `note` option on (the default), the compacted history ends with a
 short note, a plain message the session reads like any other. This is what the
@@ -239,7 +245,7 @@ typed during a tool call. The transcript path is the test's stand-in:
 
 ```text
 [fast-jev-compaction note] This conversation was just compacted without a summary: 9 of 9 listed messages kept, their text verbatim; 2 tool call(s) cut to a stub (tool name, head of input and result). Re-run a tool for anything cut.
-What the host stored beside messages since transcript line 1 (prompts sent while you worked, reports, notices, hook feedback): 2 put back whole. Each put-back opens with a line the plugin wrote naming its transcript line and sender; anything that arrived before a built-in summary was left to that summary.
+What the host stored beside messages since transcript line 1 (prompts sent while you worked, reports, notices, hook feedback): 1 of the user's prompts put back whole; 1 other deliveries put back whole. Each put-back opens with a line the plugin wrote naming its transcript line and sender, where the whole text of a shortened one still is; anything that arrived before a built-in summary was left to that summary.
 Full transcript: C:/Users/me/.claude/projects/c--dev-proj/sess-1.jsonl
 A figure you recall that is not in your visible text may be a neighbouring figure that survived; look it up in the transcript before stating it.
 ```

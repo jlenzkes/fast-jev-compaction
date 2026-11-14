@@ -55,20 +55,26 @@
     "reportHeadChars": {
       "type": "number",
       "title": "Report head (characters)",
-      "description": "How much of a report past the budget is put back; the whole text stays at its transcript line.",
+      "description": "How much of a report past the budget is put back: the report's own first words, without the host's hand-back frame. The whole text stays at its transcript line.",
       "default": 400
     },
     "taskHeadChars": {
       "type": "number",
-      "title": "Task notification head (characters)",
-      "description": "A background task's notification is put back as its summary, status and output file, at most this long.",
+      "title": "Task notice line (characters)",
+      "description": "Task notifications are put back as one list per compaction, a line each with the task's status and summary, at most this long.",
       "default": 200
     },
     "hostLineChars": {
       "type": "number",
       "title": "Host message line (characters)",
-      "description": "Hook feedback, goal check-ins and other host notices are put back as their first line, at most this long.",
+      "description": "Hook feedback, goal check-ins and other host notices are put back as one line (a label and what follows it), at most this long.",
       "default": 120
+    },
+    "unconfirmedBudget": {
+      "type": "number",
+      "title": "Unconfirmed text allowance (characters)",
+      "description": "Text the transcript attributes to the user but the plugin did not see the user send is carried whole, oldest first, up to this many characters per compaction; the rest as a head. Prompts the user was seen sending are always whole.",
+      "default": 20000
     },
     "maxStateTokens": {
       "type": "number",

@@ -18,17 +18,16 @@ export const READER_PS = [
   "$stdin = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), $enc)",
   "$want = New-Object 'System.Collections.Generic.HashSet[string]'",
   "foreach ($h in $stdin.ReadToEnd().Split(\"`n\")) { $t = $h.Trim(); if ($t) { [void]$want.Add($t) } }",
-  "$rxUuid = New-Object System.Text.RegularExpressions.Regex('\"uuid\":\"([0-9a-f-]{36})\"')",
+  "$rxUuid = New-Object System.Text.RegularExpressions.Regex('\"uuid\":\"([0-9a-f-]{36})\",\"timestamp\":\"|\"timestamp\":\"[^\"]*\",\"uuid\":\"([0-9a-f-]{36})\"')",
   "$rxImage = New-Object System.Text.RegularExpressions.Regex('\"data\":\"[A-Za-z0-9+/=]{64,}\"')",
   "$rxParent = New-Object System.Text.RegularExpressions.Regex('^\\{\"parentUuid\":(?:null|\"([^\"]*)\")')",
-  "$rxSelf = New-Object System.Text.RegularExpressions.Regex(',\"uuid\":\"([0-9a-f-]{36})\",\"timestamp\":\"', [System.Text.RegularExpressions.RegexOptions]::RightToLeft)",
   "$found = New-Object 'System.Collections.Generic.Dictionary[string,int]'",
   "$cand = New-Object 'System.Collections.Generic.List[object]'",
   "$n = 0; $lastB = 0; $bText = $null",
   "foreach ($l in [System.IO.File]::ReadLines($path, $enc)) {",
   "  $n++",
   "  if ($want.Count -gt $found.Count -and $l.Contains('\"uuid\":\"')) {",
-  "    foreach ($m in $rxUuid.Matches($l)) { $u = $m.Groups[1].Value; if ($want.Contains($u) -and -not $found.ContainsKey($u)) { $found[$u] = $n } }",
+  "    foreach ($m in $rxUuid.Matches($l)) { $u = $m.Groups[1].Value; if (-not $u) { $u = $m.Groups[2].Value }; if ($want.Contains($u) -and -not $found.ContainsKey($u)) { $found[$u] = $n } }",
   "  }",
   "  if ($l.Contains('\"subtype\":\"compact_boundary\"')) { $lastB = $n; $bText = $l }",
   "  if ($l.Contains('\"type\":\"attachment\"') -or $l.Contains('\"isMeta\":true') -or $l.Contains('\"type\":\"system\"')) { $cand.Add(@($n, $l)) }",
@@ -45,10 +44,10 @@ export const READER_PS = [
   "  if ($ln -lt $start -or $ln -eq $lastB) { continue }",
   "  $t = $rxImage.Replace($c[1], '\"data\":\"\"')",
   "  if ($t.Length -gt $cap) {",
-  "    $p = $rxParent.Match($t); $s = $rxSelf.Match($t)",
+  "    $p = $rxParent.Match($t); $s = $rxUuid.Match($t); $su = $s.Groups[1].Value; if (-not $su) { $su = $s.Groups[2].Value }",
   "    $kind = 'other'",
   "    if ($t.Contains('\"queued_command\"') -or $t.Contains('\"isMeta\":true')) { $kind = 'delivery' }",
-  "    $row = \"X`t$ln`t$($t.Length)`t$($s.Groups[1].Value)`t$($p.Groups[1].Value)`t$kind\"",
+  "    $row = \"X`t$ln`t$($t.Length)`t$su`t$($p.Groups[1].Value)`t$kind\"",
   "  } else { $row = \"L`t$ln`t$t\" }",
   "  if ($size + $row.Length -gt $budget) { $more = 'more'; break }",
   "  $out.WriteLine($row); $size += $row.Length + 1; $last = $ln",
@@ -71,23 +70,28 @@ export const READER_SH = [
   "  }",
   "  return out s",
   "}",
-  "function lastself(s,   u) {",
-  "  u = \"\"",
-  "  while (match(s, /,\"uuid\":\"[0-9a-f-]+\",\"timestamp\":\"/)) { u = substr(s, RSTART + 9, RLENGTH - 24); s = substr(s, RSTART + RLENGTH) }",
-  "  return u",
+  "function selfuuid(s) {",
+  "  if (match(s, /\"uuid\":\"[0-9a-f-]+\",\"timestamp\":\"/)) return substr(s, RSTART + 8, 36)",
+  "  if (match(s, /\"timestamp\":\"[^\"]*\",\"uuid\":\"[0-9a-f-]+\"/)) return substr(s, RSTART + RLENGTH - 37, 36)",
+  "  return \"\"",
+  "}",
+  "function want_found(s, n,   u) {",
+  "  while (match(s, /\"uuid\":\"[0-9a-f-]+\",\"timestamp\":\"/)) {",
+  "    u = substr(s, RSTART + 8, 36)",
+  "    if ((u in want) && !(u in found)) { found[u] = n; nfound++ }",
+  "    s = substr(s, RSTART + RLENGTH)",
+  "  }",
+  "  while (match(s, /\"timestamp\":\"[^\"]*\",\"uuid\":\"[0-9a-f-]+\"/)) {",
+  "    u = substr(s, RSTART + RLENGTH - 37, 36)",
+  "    if ((u in want) && !(u in found)) { found[u] = n; nfound++ }",
+  "    s = substr(s, RSTART + RLENGTH)",
+  "  }",
   "}",
   "FILENAME == \"-\" { if ($0 != \"\") { want[$0] = 1; nwant++ } ; next }",
   "{",
   "  n++",
   "  line = $0",
-  "  if (nfound < nwant && index(line, \"\\\"uuid\\\":\\\"\")) {",
-  "    s = line",
-  "    while (match(s, /\"uuid\":\"[0-9a-f-]+\"/)) {",
-  "      u = substr(s, RSTART + 8, RLENGTH - 9)",
-  "      if ((u in want) && !(u in found)) { found[u] = n; nfound++ }",
-  "      s = substr(s, RSTART + RLENGTH)",
-  "    }",
-  "  }",
+  "  if (nfound < nwant && index(line, \"\\\"uuid\\\":\\\"\")) want_found(line, n)",
   "  if (index(line, \"\\\"subtype\\\":\\\"compact_boundary\\\"\")) { lastb = n; btext = line }",
   "  if (index(line, \"\\\"type\\\":\\\"attachment\\\"\") || index(line, \"\\\"isMeta\\\":true\") || index(line, \"\\\"type\\\":\\\"system\\\"\")) { cn++; cl[cn] = n; ct[cn] = line }",
   "}",
@@ -107,7 +111,7 @@ export const READER_SH = [
   "      p = \"\"",
   "      if (match(t, /^\\{\"parentUuid\":\"[^\"]*\"/)) p = substr(t, 16, RLENGTH - 16)",
   "      kind = (index(t, \"\\\"queued_command\\\"\") || index(t, \"\\\"isMeta\\\":true\")) ? \"delivery\" : \"other\"",
-  "      row = \"X\\t\" ln \"\\t\" length(t) \"\\t\" lastself(t) \"\\t\" p \"\\t\" kind",
+  "      row = \"X\\t\" ln \"\\t\" length(t) \"\\t\" selfuuid(t) \"\\t\" p \"\\t\" kind",
   "    } else row = \"L\\t\" ln \"\\t\" t",
   "    if (size + length(row) > budget + 0) { more = \"more\"; break }",
   "    print row",
@@ -145,9 +149,14 @@ export const READER_BUDGET = 3_500_000;
 export const READER_LINE_CAP = 1_048_576;
 
 const IMAGE_DATA = /"data":"[A-Za-z0-9+/=]{64,}"/g;
-const UUID_KEY = /"uuid":"([0-9a-f-]{36})"/g;
+/**
+ * A record's own uuid: the one beside its timestamp key, in either order. On a
+ * real transcript this finds every record's uuid and never a second one (11,969
+ * of 11,969 records); a nested object holding a uuid and a timestamp side by
+ * side would also match, and is the rule's stated limit.
+ */
+const UUID_KEY = /"uuid":"([0-9a-f-]{36})","timestamp":"|"timestamp":"[^"]*","uuid":"([0-9a-f-]{36})"/g;
 const PARENT_FIRST = /^\{"parentUuid":(?:null|"([^"]*)")/;
-const SELF_UUID = /,"uuid":"([0-9a-f-]{36})","timestamp":"/g;
 
 function isCandidate(line: string): boolean {
   return line.includes('"type":"attachment"') || line.includes('"isMeta":true') || line.includes('"type":"system"');
@@ -169,7 +178,10 @@ export function scanTranscript(text: string, handles: readonly string[], options
     const l = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const n = i + 1;
     if (want.size > found.size && l.includes('"uuid":"')) {
-      for (const m of l.matchAll(UUID_KEY)) if (want.has(m[1]!) && !found.has(m[1]!)) found.set(m[1]!, n);
+      for (const m of l.matchAll(UUID_KEY)) {
+        const u = m[1] ?? m[2]!;
+        if (want.has(u) && !found.has(u)) found.set(u, n);
+      }
     }
     if (l.includes('"subtype":"compact_boundary"')) {
       lastB = n;
@@ -192,7 +204,8 @@ export function scanTranscript(text: string, handles: readonly string[], options
     let row: string;
     if (t.length > options.lineCap) {
       const p = PARENT_FIRST.exec(t)?.[1] ?? '';
-      const s = [...t.matchAll(SELF_UUID)].at(-1)?.[1] ?? '';
+      const self = [...t.matchAll(UUID_KEY)][0];
+      const s = self ? (self[1] ?? self[2]!) : '';
       const kind = t.includes('"queued_command"') || t.includes('"isMeta":true') ? 'delivery' : 'other';
       row = `X\t${ln}\t${t.length}\t${s}\t${p}\t${kind}`;
     } else row = `L\t${ln}\t${t}`;
@@ -397,7 +410,8 @@ export type ReadResult = { window: Window; ms: number; runs: number; via: 'fs' |
  */
 export async function readWindow(
   host: ReaderHost,
-  windows: boolean,
+  /** Windows PowerShell's executable on Windows; undefined elsewhere (sh). */
+  powershell: string | undefined,
   path: string,
   handles: readonly string[],
   now: () => number,
@@ -409,8 +423,8 @@ export async function readWindow(
     const w = parseRows(scanTranscript(text, handles, { budget: Number.MAX_SAFE_INTEGER, lineCap: READER_LINE_CAP }));
     return { window: w, ms: now() - t0, runs: 0, via: 'fs' };
   }
-  const argv = windows
-    ? ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(READER_PS)]
+  const argv = powershell
+    ? [powershell, '-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(READER_PS)]
     : ['sh', '-c', READER_SH];
   let window: (Window & { more: boolean; last: number }) | undefined;
   let from = 0;
@@ -429,7 +443,7 @@ export async function readWindow(
     if (runs >= MAX_RUNS || part.last < (from || part.start)) throw new ReaderError('the window is larger than the reader can return');
     from = part.last + 1;
   }
-  return { window, ms: now() - t0, runs, via: windows ? 'powershell' : 'sh' };
+  return { window, ms: now() - t0, runs, via: powershell ? 'powershell' : 'sh' };
 }
 
 // ---------------------------------------------------------------------------
