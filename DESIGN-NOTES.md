@@ -6,8 +6,11 @@ The rules the code keeps:
 
 1. A guess may fail only toward a **duplicate** (a second, labelled copy),
    never toward a **loss** (something someone said disappears) or a
-   **misattribution** (it reads as someone else's words). One exception, by
-   measurement, is stated below.
+   **misattribution** (it reads as someone else's words). Three exceptions
+   can lose words, each stated in the table with its basis: the same words
+   typed twice in one window, the host's keeping what sits beside a plain
+   user message (measured), and a placed put-back the host does not keep
+   (measured not to happen; reported if it does).
 2. Every untrusted input is checked or bounded where it enters. A bad one is
    ignored and the receipt says so; nothing throws before the built-in
    fallback can run.
@@ -17,7 +20,7 @@ The rules the code keeps:
 | What the plugin infers | From | If wrong |
 |---|---|---|
 | A prompt is stored beside a message, not as one | It reached `prompt.submit` with a `turnId`, or its **accepted** origin is not the user's (idle prompts the host lists as their own message) | Put back although the host lists it: the listing then shows the same text, which counts as present (below), so at worst a **duplicate** |
-| Where it sits | The newest messages `$.session.messages()` held when `prompt.submit` ran (the last tool result and fingerprints of the last 8 messages; only that tail is read, though the call answers the whole chain, which grows with each compaction). Measured in headless probes on 14 Nov 2026: `prompt.submit` runs after the tool result the prompt then sits beside is stored | **Misplaced**, labelled: a point not found makes an orphan, put back after the latest earlier put-back (else at the end) with a first line saying its place is unknown and it may also appear elsewhere. A mid-turn prompt whose turn ended with no tool result goes at the end of its turn, saying so |
+| Where it sits | The newest messages `$.session.messages()` held when `prompt.submit` ran (the last tool result and fingerprints of the last 8 messages; only that tail is read, though the call answers the whole chain, which grows with each compaction). Measured in headless probes on 14 Nov 2026: `prompt.submit` runs after the tool result the prompt then sits beside is stored | **Misplaced, unlabelled**, if a host calls `prompt.submit` at Enter instead: on the real 778-message input, 14 of 36 mid-turn deliveries then land two or three messages early (none lost or split from a tool call). **Misplaced**, labelled: a point not found makes an orphan, put back after the latest earlier put-back (else at the end) with a first line saying its place is unknown and it may also appear elsewhere. A mid-turn prompt whose turn ended with no tool result goes at the end of its turn, saying so |
 | The host already lists the delivery itself | A listed plain user message whose text is **exactly** the delivered text, after the delivery's point and before the next tool result, each listed message matching at most one delivery | **Loss** only if the user typed the very same words again in that window, before any tool ran; then they are one message in the history |
 | The host keeps the delivery itself | Its point is a plain user message, which the plugin hands back whole with its handle. **Measured**, not guessed: over 26 plugin compactions, 159 of 159 deliveries beside such a message survived when that message did; the 12 exceptions are explained (the message itself was gone, or it was a `Compacted` line whose text recurs) | **Loss** if the host stops keeping them. If that message is itself gone, the point is not found and the delivery is put back as an orphan |
 | A listed message is the plugin's own put-back or receipt | Its first line names an id the record holds, and the rest is exactly that record's delivered text (indented) or matches its SHA-256; each record matches at most one message, the first | Look-alikes and pastes are ordinary text everywhere: anchors, receipts, the goal, the debug log. A paste of a real receipt after the receipt itself is kept |
