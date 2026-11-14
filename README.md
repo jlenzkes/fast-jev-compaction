@@ -190,9 +190,9 @@ The install prompts for the plugin options (API key, thresholds, `truncateHeadCh
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
 Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
-replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
-could not remove enough (short sessions, or when it fails).
+`fast-jev-compaction: kept N/M listed messages (…), no summary (…)` when the
+pruned history replaced the built-in summary, or `fallback to built-in summary (…)`
+when Jev could not remove enough (short sessions, or when it fails).
 
 In VS Code and the desktop app the plugin cannot start a compaction itself, so
 when context reaches `compactAtPercent` it toasts
@@ -203,6 +203,46 @@ text it does not run.
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
+
+### What you see after a compaction
+
+The compacted history ends with a short receipt, a plain message the session
+reads like any other, so it does not have to guess what went missing. From a
+real 778-message session (its private text replaced):
+
+```text
+[fast-jev-compaction receipt] This conversation was just compacted without a summary. Every text message was kept verbatim; 264 tool call(s) cut to a stub (tool name, head of input and result). Re-run a tool for anything cut.
+Not carried: 744 message(s) were rebuilt, and whatever the host had stored beside them and never shows a plugin (Stop hook feedback, goal check-ins, notices) did not survive, except the delivered prompts put back below.
+Put back as messages of their own (36), each where it arrived:
+- task-notification: Agent "Build the parser" finished
+- composer: Do you have a new ETA for me?
+- peer a1b2c3: ...VERDICT: APPROVE What I read: ...
+- and 33 more
+Full transcript: ~/.claude/projects/<project>/<session-id>.jsonl
+A figure you recall that is not in your visible text may be a neighbouring figure that survived; look it up in the transcript before stating it.
+```
+
+Why "put back": Claude Code stores some messages *beside* another message
+rather than as one of their own - a prompt you type while the agent works, a
+subagent's report, a background task's notice, a Stop hook's feedback. The
+compaction hook is never shown those, and the host drops them with the
+message they sit beside whenever that message is rebuilt, which is every
+assistant message and every tool result. The plugin notes each delivered
+prompt as it arrives (`prompt.submit`) and puts it back, as a message of its
+own, where it arrived; hook feedback never passes through `prompt.submit`, so
+the receipt says it could not be carried. Set the `receipt` option to `false`
+to leave the receipt out.
+
+## Repository layout, and other harnesses
+
+`src/` is the harness-neutral library: messages in (`{ role, text, toolUses,
+toolResults }`), Jev asked, messages out, with no knowledge of any agent
+harness. `hooks/` is the Claude Code adapter: it maps Claude Code's
+`session.compact` messages onto the library's and back, and owns everything
+specific to Claude Code (handles, delivered prompts, the receipt, the toast).
+An adapter for another harness - Codex CLI, Gemini CLI or any other with a
+compaction hook - would be a folder of its own beside `hooks/`, calling the
+same library; none exists yet.
 
 ## Development
 

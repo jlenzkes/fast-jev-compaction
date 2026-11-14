@@ -63,6 +63,7 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
+| `receipt` | `true` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -85,6 +86,25 @@ desktop app, `claude -p`) refuses that request; there the hook toasts
 crosses `compactAtPercent`, and again each further 10 points, instead of
 logging a refusal on every turn. A compaction, or context falling back below
 the threshold, starts the count again.
+
+Claude Code stores some messages beside another message rather than as one:
+a prompt typed or delivered while a turn runs (a `queued_command`
+attachment), a subagent's report that starts a turn of its own, a Stop
+hook's feedback. `session.compact` never lists them, and they survive only
+when the message they sit beside goes back with its handle, which only a
+plain user message does. The `prompt.submit` hook therefore notes every
+prompt that is not the user's own Enter at an idle prompt, with where it
+arrived (the last tool result then, and how many messages followed it); the
+`session.compact` hook puts each back as a plain user message after the
+message it sat beside, unless it is already a message of its own or sits
+beside a plain user message, which the host keeps whole. The notes live in
+memory, so a plugin reload forgets the ones not yet compacted. Hook feedback
+never passes through `prompt.submit` and cannot be put back. The toast counts
+what it can see: `kept N/M listed messages (R rebuilt, without what the host
+stores beside them; P delivered prompt(s) put back)`. With `receipt` on, the
+handed-back history ends with a plain user message saying the same, listing
+the prompts put back (capped at 12, then "and N more") and naming the
+transcript file when the usual path for it exists.
 
 ## Scope and caveat
 

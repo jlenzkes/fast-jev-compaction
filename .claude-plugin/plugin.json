@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
@@ -39,6 +39,12 @@
       "title": "Drop whole tool calls",
       "description": "When Jev rates a call as no longer needed, remove the call and its result. Off: keep the call as a stub, its tool name with input and result cut to a head, so the history still shows a tool call before every report; a call an earlier compaction already stubbed is removed.",
       "default": false
+    },
+    "receipt": {
+      "type": "boolean",
+      "title": "Receipt after compaction",
+      "description": "End the compacted history with a short message saying what was cut, which delivered prompts were put back, what could not be carried, and where the full transcript is.",
+      "default": true
     },
     "maxStateTokens": {
       "type": "number",
