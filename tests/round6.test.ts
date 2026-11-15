@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { Confirmations, cutAt, decideCarry, putBackText } from '../hooks/deliveries.ts';
 import { compactSession, PUT_BACK_DEFAULTS, resolveHookConfig, sourcesOf } from '../hooks/fast-jev.ts';
-import { isUtf8, neighbourOf, parseLines, readWindow, windowOf } from '../hooks/transcript.ts';
+import { deliveryOf, isUtf8, neighbourOf, parseLines, readWindow, windowOf } from '../hooks/transcript.ts';
 import {
   bookkeeping,
   boundary,
@@ -136,10 +136,27 @@ describe('the walk: every record type, every way it ends', () => {
     expect(out.indexOf(holding(out, 'AT-THE-START')[0]!)).toBe(0);
   });
 
-  it('carries nothing from a sidechain', () => {
+  it('carries nothing from a sidechain, in the window and in deliveryOf itself', () => {
     const h = history();
     const w = parsed(transcript(withHidden(h, { 6: [{ ...queued('SIDE', 'peer'), isSidechain: true }] })).text);
     expect(w.deliveries).toHaveLength(0);
+    const record = { ...queued('SIDE', 'peer'), uuid: uuid(), parentUuid: h[6]!.handle };
+    expect(deliveryOf(record, 1)).toBeDefined();
+    expect(deliveryOf({ ...record, isSidechain: true }, 1)).toBeUndefined();
+  });
+
+  it('leaves to the summary a delivery before the boundary whose parent is outside the window, uncounted', async () => {
+    const before = [message('user', 'old prompt'), message('assistant', 'preserved'), message('assistant', 'summarized')];
+    const rider = { ...queued('PARENT-BEFORE-THE-WINDOW', 'peer'), parentUuid: before[0]!.handle };
+    const old = transcript([...before, rider]);
+    const later = [message('user', 'This session is being continued...'), message('user', 'next'), call('t5'), result('t5')];
+    const file = transcript([boundary([before[1]!.handle!]), ...withHidden(later, { 3: [queued('AFTER', 'peer')] })], { lines: old.text.trimEnd().split('\n') });
+    const t = harness({ minReductionRatio: -1e9 });
+    t.file(file.text);
+    const out = await t.compact([later[0]!, before[1]!, ...later.slice(1)]);
+    expect(holding(out, 'PARENT-BEFORE-THE-WINDOW')).toHaveLength(0);
+    expect(holding(out, 'AFTER')).toHaveLength(1);
+    expect(out.at(-1)!.text).not.toContain('not put back: they sat beside');
   });
 
   it('names a too-large rider of a preserved message, before the boundary', async () => {
@@ -158,12 +175,12 @@ describe('reading backwards', () => {
   it('stops once it has passed the boundary before the last when a listed handle is missing, and stands down', async () => {
     const h = history();
     const pad = (n: number) => message('assistant', 'p'.repeat(n));
-    const file = transcript([pad(2_500_000), boundary(), pad(2_500_000), boundary(), ...withHidden(h, { 6: [queued('Q', 'peer')] }), pad(2_000_000)]).text;
+    const file = transcript([pad(9_000_000), boundary(), pad(2_500_000), boundary(), ...withHidden(h, { 6: [queued('Q', 'peer')] }), pad(2_000_000)]).text;
     const host = { stat: async () => ({ size: Buffer.byteLength(file) }), read: async () => file, run: transport(file) };
     const missing = message('assistant', 'never written');
     const r = await readWindow(host, undefined, 'p', [...h, missing].map((m) => m.handle!), () => 0);
     expect(r.window.found.has(missing.handle!)).toBe(false);
-    expect(r.runs).toBeLessThan(8);
+    expect(r.bytes).toBeLessThan(Buffer.byteLength(file));
   });
 });
 
