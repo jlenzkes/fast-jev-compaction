@@ -1,0 +1,372 @@
+# Long runs: work that outlives one context
+EXPERIMENTAL. First-use trials passed by this generic procedure: none yet; a Codex trial follows this build.
+
+Use this for a Claude Code, Codex CLI or Gemini CLI session launching workers,
+or resuming their work, when the work will outlive one context window.
+A worker may be a subagent, a headless builder or an outside reader.
+Read this file whole before starting and after every loss of context.
+Nothing needed to resume may live only in the conversation.
+
+## Three rules to keep before reading further
+
+1. Write state changes to disk before reporting them; record every worker's
+   result the moment it arrives, before replying or doing other work.
+2. Give every worker a file brief and job folder; record its handle and
+   expected output in STATE.md when launching it.
+3. After compaction, restart or handover, read and verify the run on disk
+   before acting. Look for completed results before relaunching anything.
+
+## Terms and host slots
+
+The *orchestrator* is the session owning the run. A *coordinator* manages a
+builder for it; without one, the orchestrator owes those duties itself.
+*Lineage* means Claude, GPT through Codex, or Gemini.
+`<repo>` is the host checkout; `<run>` is a persistent folder outside every
+checkout; `<procedure>` is the absolute path to this file in the plugin install
+or a local copy. `<base>` is the host's integration branch, not a fixed name.
+Resolve paths to absolute paths and quote them in runnable commands.
+
+Before work starts, fill these named slots in STATE.md. Examples illustrate
+the shape, not commands or permissions supplied by this plugin.
+
+| Slot | What the host supplies | Example |
+| --- | --- | --- |
+| REPO, BASE, RULES | checkout, integration ref, instruction files | checkout path, `main`, `AGENTS.md` |
+| REVIEW | required readers, re-review policy, exception authority, evidence format | two readers approve the exact tip; changes return to affected readers |
+| CHECKS | exact commands, expected outcomes, resource limits | `npm test`, exit zero; one suite at a time |
+| INTEGRATE | authorized integrator, exact local command, success witness | maintainer merges a reviewed branch; record resulting commit |
+| FINDING_HOMES | durable destinations for defects, tasks, ideas, human actions | issue tracker, backlog file, decision log |
+| REMOVE_ENV | credential names to remove and exact command prefix | `env -u EXAMPLE_TOKEN` in a POSIX shell |
+| AUTH | any credential exception, network and sandbox grants by task | none; offline worker with writes only in its job folder |
+| LAUNCH | installed CLI paths, models, start/resume commands, environment controls | host-checked command per lineage, with output and exit-status files |
+| ENTRYPOINT | durable pointer by which a new session finds the active run | task description containing the absolute STATE.md path |
+
+Use `none` where a slot truly does not apply, with a reason. If a required
+slot is missing, record BLOCKED and the missing fact; do independent work only.
+Do not invent a review policy, a credential list, a launcher or access grant.
+This procedure supplies no launch, cleanup or integration scripts.
+
+Prerequisite: the host maintainer supplies these slots once, in existing host
+instructions or a run setup brief. The orchestrator can derive paths, refs,
+checks and CLI syntax from those instructions and installed help; credential
+names and approval authority need a host declaration, not inference. Before
+launching a worker, confirm that each slot is filled and all needed commands
+are available under AUTH. A first-time reader without that setup records the
+missing slots as BLOCKED rather than attempting an undocumented launch.
+
+## Create the run once
+
+1. Choose `<run>` on persistent storage outside all checkouts. Reject a path
+   with a `.git` segment. Ask git about its nearest existing ancestor with
+   `git -C "<ancestor>" rev-parse --is-inside-work-tree`.
+   Proceed only when git positively reports `not a git repository`;
+   missing git, permission errors or damaged repositories are not proof.
+2. Create `<run>/briefs/`, `<run>/findings/` and `<run>/jobs/`.
+   Copy [STATE.md](long-runs/templates/STATE.md),
+   [PROGRESS.md](long-runs/templates/PROGRESS.md) and
+   [FOUND.md](long-runs/templates/FOUND.md) into `<run>`.
+   Keep any existing files. If STATE.md exists, recover instead of initializing.
+   If only other files exist, inspect and preserve them before filling STATE.md.
+3. Replace every template placeholder. Record the goal, paths, host slots,
+   machine-clock date and timezone, base sha, branch tips and next action.
+   Obtain git facts with the commands in recovery below.
+4. Write tested, pasteable start commands for each available lineage into
+   STATE.md and PROGRESS.md, labelled by lineage. Mark unavailable commands
+   `not yet tried` or `unavailable`; do not leave a runnable-looking guess.
+   Each command starts in `<run>`, applies REMOVE_ENV, and supplies this prompt:
+
+   > Read `<procedure>` whole, then the RULES files in STATE.md. Your run folder
+   > and working directory are `<run>`. Read STATE.md and PROGRESS.md. Follow
+   > Recovering after a lost context before acting on any existing work.
+
+   Record the absolute STATE.md path at ENTRYPOINT, outside the run folder,
+   within authorized writes (for example, the host's existing task description).
+   A takeover invocation or handoff must include that path. If no durable
+   pointer can be written, deliver the absolute path in the handoff and record
+   that limitation; a session given neither pointer nor run path cannot resume.
+
+5. Apply REMOVE_ENV before launch. In the started session, use a host-supplied
+   names-only check for credential-shaped names (KEY, TOKEN, SECRET, PASSWORD,
+   case insensitive), plus the host's known names. Never dump the environment
+   or open credential-bearing files. Settings or a rebuilt child environment
+   can restore stripped names. Record names only and the removal prefix in
+   STATE.md; paste [credentials.md](long-runs/templates/credentials.md) into
+   each brief with its placeholders filled. Unexpected names block affected
+   commands until removed or covered by AUTH. Do not claim a pattern finds all secrets.
+6. Keep the orchestrator's working directory at `<run>`. Workers write only
+   their assigned job folders or isolated clones. Record Update 1 and the Now
+   block before the first work report. No access grant flows from parent to child.
+
+## The run folder and state
+
+```text
+<run>/
+  STATE.md           start commands, host slots, Now block, append-only updates
+  PROGRESS.md        counted outcomes, human actions, reversible decisions
+  FOUND.md           discoveries and their durable dispositions
+  briefs/            shared round briefs
+  findings/          one file per review round
+  jobs/<job>/        PROMPT.md, input copies, isolated clone if needed, outputs, tmp/
+```
+
+The Now block is rewritten at every update. It holds the machine-clock date,
+time and timezone; base ref and sha; every branch and tip the run moves;
+worktree paths and sole owners; authorized heavy runs; next action; and one
+row per in-flight job, including coordinators and integration jobs.
+Each row holds kind, handle, lineage/model, folder, brief, expected output,
+start time and coordinator if any. Use actual returned handles, never invented ones.
+A row leaves Now only after its result is recorded in an update.
+
+Append an update, newest last, whenever work launches, returns or stops;
+a branch tip moves (including a fetch); a decision or human ruling arrives;
+or context loss is approaching. Include evidence paths and quote rulings.
+Write the update before the reply announcing the change. Update PROGRESS.md
+when a counted outcome or human obligation changes. Record discoveries in
+FOUND.md immediately, with the clock time, witness and proposed home.
+
+Before expected context loss, write conditions on disk, not stale orders:
+"if the output has a success witness and git confirms the commit, record it;
+if the process is alive, wait within the recorded bound; otherwise inspect
+the partial log and record STOPPED before deciding whether to restart."
+Record process ids and the host's liveness check when processes are involved.
+
+## Recovering after a lost context
+
+Do this after built-in compaction, Jev compaction, a restart or a new lineage
+taking over. Memory and a compaction summary are pointers, not current state.
+
+1. Read this procedure whole, then STATE.md's slots, start commands, Now block
+   and latest updates; PROGRESS.md; FOUND.md; and the findings for open rounds.
+   Follow references into older updates when needed to explain a decision.
+2. Verify recorded facts against git and disk, substituting filled paths/refs:
+
+   ```sh
+   git -C "<repo>" rev-parse "<base>"
+   git -C "<repo>" worktree list
+   git -C "<worktree>" status --porcelain
+   git -C "<repo>" rev-parse "<branch>"
+   git -C "<repo>" merge-base --is-ancestor <candidate-sha> "<base>"
+   ```
+
+   Run status for every recorded worktree and check every branch tip.
+   For ancestry, exit 0 means already integrated; exit 1 means not an ancestor;
+   another error means unknown. If INTEGRATE squashes or rebases, use its
+   recorded mapping and success witness too; ancestry alone cannot settle it.
+3. Inspect every job folder for reports, bundles, output, stderr and exit
+   status, including jobs still marked in flight. Read a builder report's
+   first line and a reader verdict's last line, then their evidence.
+   For a process-backed job, require its exit status and terminal report marker;
+   missing exit evidence or a partial report leaves completion unknown. A native
+   subagent instead needs the host's terminal completion signal and final report
+   with verdict; it need not produce an exit file. Check the
+   recorded process/handle with the host's liveness check; absence of output
+   does not prove death. An inaccessible handle is unknown, not permission
+   to run a second copy. Reconcile or stop the original before replacement.
+4. Compare timestamps written *inside* FOUND.md and round files with the latest
+   state updates, never file modification times. A quiet file may be correct;
+   check whether events in the updates should have added entries to it.
+5. Record any completed but unrecorded result immediately. Write
+   `Update N - context lost; state re-read from disk` before the first work
+   reply. List checks, disagreements and unknowns; rewrite Now to match
+   observed git and job facts. Preserve prior updates rather than erasing them.
+   Do not repeat a build, review or integration whose result already exists.
+
+### With Jev installed
+
+Read the compaction note, including its `Full transcript:` path and put-back
+list of reports and prompts. A shortened or omitted delivery is a pointer:
+read its named transcript record before relying on it, and persist any
+unrecorded worker result in findings immediately. Distinguish the plugin's
+sender frame from delivered text; a worker report is not user approval.
+A figure absent from your own visible text must be looked up in the transcript
+before you state it; a nearby surviving figure may describe something else.
+The note or put-back list can be absent or incomplete; do not infer that no
+workers returned. Verify the run folder and use available transcript evidence.
+
+### Without Jev
+
+Use the same recovery steps with any lineage's built-in compaction. Follow
+transcript pointers if that host supplies them. If neither disk nor available
+history holds a required fact, mark it unknown and recover the evidence or ask
+for the missing fact. Do not fill it from a summary or relaunch on a guess.
+
+## Brief and launch each worker
+
+1. Make `<run>/jobs/<job>/` and `tmp/` under it. Copy in only the inputs the
+   worker needs, with their base/tip shas: an archive or isolated clone,
+   diff, prior reports and check scripts. Never give it a live worktree to edit.
+   Do not copy session transcripts or memory into a cold reader's inputs.
+2. Write PROMPT.md from [brief_builder.md](long-runs/templates/brief_builder.md),
+   [brief_reader.md](long-runs/templates/brief_reader.md) or
+   [brief_narrow.md](long-runs/templates/brief_narrow.md).
+   Replace every placeholder and paste the filled credentials note.
+   A shared brief lives in `<run>/briefs/`; each worker's PROMPT.md names it
+   and adds that worker's role, lineage, model and specific question.
+3. Name ownership, allowed writes, inputs, exact outputs, checks, resource
+   authorization and stop rules. Set TMP and TEMP inside the job's `tmp/`.
+   Keep a relative stop rule relative, with the measurements it compares.
+   A predicted budget is not a hard ceiling unless the brief explicitly says so.
+4. Launch with "Read `<run>/jobs/<job>/PROMPT.md` whole and follow it."
+   The host launcher may append sandbox restrictions. Save the command,
+   returned handle, model, start time, output paths and expected terminal
+   marker in Now immediately. Record launch intent before invoking it so a
+   loss between launch and handle recording leaves a discoverable job.
+5. A correction is a new PROMPT_R2.md and a one-line instruction to read it.
+   On return, require acknowledgement that it was read. Preserve earlier briefs.
+   Resume a live resumable thread for follow-up; record replacement and reason
+   when the old host/session cannot resume it.
+6. A builder writes BUILD_REPORT.md starting `BUILT (<n> commits, tip <sha>)`
+   or `STOPPED - <one clause>` and returns a git bundle. A reader writes its
+   assigned report ending `VERDICT: APPROVE` or `VERDICT: OBJECT - <findings>`.
+   CANNOT TELL is an objection with missing evidence stated. Require a subagent
+   to return its report in its final message too, since file writes may fail.
+7. On arrival, copy a subagent's verdict, each finding with witness, and checks
+   not run into the round file *before any other work*. A headless report is
+   already on disk: immediately record its path, terminal marker and facts in
+   the round file/state update. Keep the job in Now until that recording is done.
+
+## Running a builder and reviewing the result
+
+The coordinator gets its own job row before launching a builder; the builder's
+row names it. The coordinator (or orchestrator acting in that role) must:
+
+1. Measure the target before editing when the job exists to make a failing
+   operation succeed. If it fails for an unrelated reason, stop that dependent
+   work. Passing newly written checks is not the target passing.
+2. Name each commit, files, scope exclusions, hard ceilings, predictions and
+   stop clauses in the brief. Remove host-specific clauses that do not apply;
+   supply relevant host clauses verbatim. Keep independent commits moving past
+   a stop only when the brief permits that and dependencies remain valid.
+3. On return, verify the bundle and tip in isolation, read the entire diff
+   against the exclusions, and rerun CHECKS outside the builder's sandbox.
+   Run any checks deferred to TO_RUN_OUTSIDE.md within AUTH, or record them owed.
+   Compare predictions with observations; quote output and who actually ran it.
+4. Treat a reader's statement as a claim. Re-derive dependencies, figures and
+   negative searches before building a fix. Label claims RAN, READ or NOT CHECKED.
+5. Use [review_round.md](long-runs/templates/review_round.md) for each round.
+   Spread readers across lineages when available; a builder should have a
+   reader from another lineage. Record unavailable coverage. Batch fixes by
+   the property that closes findings; each reader rechecks its own findings.
+6. Apply REVIEW to the exact integration tip. Wait for every required reader;
+   an exception needs the host's authorized ruling quoted, with readers still
+   absent or objecting named in the integration evidence. Disclosure alone
+   does not authorize skipping review. If this lineage cannot run the host's
+   integration workflow, record READY FOR INTEGRATION with branch, tip,
+   checks and message file, and hand it to the named integrator.
+
+Fetch worker bundles only in the host-authorized integration location. Record
+every ref movement and the INTEGRATE success witness; confirm git afterwards.
+No worker writes the main checkout or integrates on its own authority.
+
+## Claude Code
+
+The source used background subagents with an explicit model and recorded id.
+Its id could resume only inside the launching session; a fresh session used
+the saved job inputs. Explore and Plan readers there did not load CLAUDE.md;
+repeat required rules in the brief, and disclose inherited context before
+calling a read cold. An actual cold read needs host isolation, not a role name.
+Check a subagent's actual model in its transcript's assistant `model` fields;
+the orchestrator model in metadata was not evidence of the worker's model.
+Model aliases and their suitability belong in LAUNCH, not in this procedure.
+
+The source starter used `claude "<start-prompt>" --add-dir "<repo>"` from the
+run folder with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` to load added
+instructions. Project settings did not load from that added directory, while
+session settings could restore environment values. Do not assume added-directory
+instructions imply hooks or permissions. Other Claude launch arrangements:
+not yet tried here. This generic procedure's first-use trial: not yet tried.
+
+## Codex CLI (GPT lineage)
+
+The source starter used `codex --cd "<run>" --sandbox workspace-write "<start-prompt>"`.
+Its Windows sandbox was reported to block worker network access. That is an
+environment observation, not a universal Codex rule or a reason to escalate.
+It also offered `--sandbox danger-full-access` under a separate human grant;
+never pre-fill that grant in saved start commands or infer a child grant from it.
+Codex did not load CLAUDE.md there; the start prompt explicitly requested RULES.
+
+The source prescribed a host-local wrapper in `one` and `resume` modes with
+a job folder, prompt file and output file. That wrapper is not shipped here;
+LAUNCH must supply an installed equivalent and its exact syntax. The source
+saved the returned session handle from stderr, resumed that same thread for
+follow-ups and avoided ephemeral sessions. Its sandbox refused writes outside
+the job folder and could not stop processes it started; those actions were
+deferred to TO_RUN_OUTSIDE.md. It used a checked full interpreter path after
+command lookup failed. Usage-limit messages ended the attempt, not a wait.
+The source still listed real-Codex wrapper use as unproven. Direct headless
+CLI syntax, other sandbox behavior and this generic procedure's
+first-use trial: not yet tried. Do not copy the source environment's limits as facts.
+
+## Gemini CLI
+
+The source used Gemini as a narrow reader: one question answerable from two
+files, writing VERDICT.md early and updating it after each row. Longer reads
+were reported to time out without output. Its launcher used an explicitly
+selected binary and model with `-p "<prompt>" --model "<model>" --sandbox`,
+added the interpreter directory with `--add-dir`, and bounded the run with
+`--print-timeout`. It captured stdout, stderr, exit status and start time,
+set TMP/TEMP in the job folder and instructed small Python scripts to use `-I`.
+The supplied source still listed real-model launcher use as unproven.
+
+Its reader trial hit sandbox refusal on git; source notes also warn Python
+may be refused. Supply needed git facts as files. After a refusal, record
+NOT RUN and continue by reading; do not relabel READ as RAN. A quota message
+ends the attempt. Gemini orchestration, cold Now-block reconstruction and
+this generic procedure's first-use trial: not yet tried. A Gemini orchestrator
+uses the same disk protocol with host-verified LAUNCH commands; do not assume
+the reader launcher establishes orchestration support.
+
+## Using this from Codex CLI or Gemini CLI
+
+Install or copy this document and its adjacent templates locally; Jev is optional.
+Resolve `<procedure>` to its absolute path. Add this exact line to AGENTS.md
+(Codex CLI) or GEMINI.md (Gemini CLI), replacing that one placeholder:
+
+```text
+For sessions launching workers, or resuming their work, that will outlive one context window, read <procedure> whole before acting and follow its disk-state and recovery procedure.
+```
+
+Fill LAUNCH from the installed host's instructions without guessing new flags.
+Keep the start/resume commands and run path in STATE.md and PROGRESS.md so a
+first-time session can find both. A built-in summary never replaces those files.
+
+## Progress, findings and finishing
+
+PROGRESS.md's first line under the title is a count and its counting rule,
+dated from the machine clock. Count separate deliverable types separately.
+If scope changes, show the old and new denominator and why. Human actions
+point to their durable home by id and title; do not copy a second question.
+Keep exact integration success lines and reversible decisions with evidence.
+
+Before ending, give every FOUND.md item a durable home from FINDING_HOMES or
+`none` with a reason. A draft is owed until its filing is confirmed; record
+the resulting commit or issue reference. File repository changes through an
+isolated clone and INTEGRATE, within the run's authorized scope.
+Record final tips, checks run and not run, remaining jobs and the next action.
+Never say complete while work or dispositions required by the run remain owed.
+
+## Resource and execution limits
+
+Heavy runs require authorization recorded in Now: command, worker and bound.
+Serialize timing-sensitive checks according to CHECKS. Recheck failures seen
+under contention alone before treating them as defects. No machine-wide process
+priority changes or shared locking protocol is supplied by this procedure.
+Write shell code containing backticks or substitutions into files with a safe
+editor, then execute the file; do not interpolate it through another shell.
+Use bounded waits or recorded background jobs, never an endless follow command.
+Stop only processes you started, by recorded id; delete only your own exact paths.
+If AUTH allows broader access for a named task, record base/branch tips,
+worktrees and statuses before and after; report changes outside the job first.
+Never print environments, settings/configuration dumps or credential values.
+If output contains a suspected secret, report its location without quoting it.
+
+## Not yet proven by use
+
+- First-use completion and cold recovery of this generic version in any lineage.
+- Real host launch/resume commands, credential controls and settings inheritance.
+- Cross-lineage takeover, review and integration under a new host's policies.
+
+This is a disk protocol followed by the sessions, not automatic enforcement.
+The templates do not launch workers, capture reports, strip credentials or
+verify git. Host controls enforce only what the host actually implements;
+state updates, immediate report capture and recovery checks remain on the sessions.
