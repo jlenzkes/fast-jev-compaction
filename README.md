@@ -138,6 +138,16 @@ than the result it replaced.
 - The full state is repeated with every request, so a history near the state
   ceiling costs one request per handful of questions.
 
+## Long runs (experimental)
+
+The [long-run procedure](docs/long-runs.md) keeps worker briefs, results and
+current state on disk so a fresh session can resume after compaction or restart.
+It includes [templates](docs/long-runs/templates/) and a Claude Code
+[skill entrypoint](skills/long-runs/SKILL.md). Codex CLI and Gemini CLI setup
+is in the procedure. It works with Jev or built-in compaction.
+This is experimental: no lineage has passed a first-use trial of this generic
+version yet. Host launch, review and integration policies must be supplied.
+
 ## Claude Code plugin
 
 The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
