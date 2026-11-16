@@ -1,8 +1,15 @@
-First command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
+After reading, first chosen command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
 Writer: fill actual literals used preparing this job; send no placeholders:
 REMOVE_ENV: {{EXACT_REMOVE_ENV_PREFIX}}; TMP: {{ABSOLUTE_TMP}}; TEMP: {{ABSOLUTE_TEMP}}.
 Use supplied values or derive env -u per name and absolute current job/tmp; create it prefixed.
 Never stop for absent literals. If copied, map {{JOB_FOLDER}} to the current brief folder for TMP/TEMP.
+Governing brief: {{BRIEF_FILE_AND_REVISION}}. Acknowledge the actual file/revision read.
+
+Harness/standing-instruction actions before this brief was read are environment facts,
+not violations. Record known actions, paths and imposing source in your report/final
+message (outside fixed-format artifacts). Never object or stop for them. After reading,
+your choices obey this scope; don't use earlier outside reads as task evidence.
+
 Review {{ARTIFACT}} at {{TIP}}, base {{BASE_SHA}}.
 Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. Question: {{SPECIFIC_QUESTION}}.
 Shared brief, if any: {{PATH_OR_NONE}}. Read each assigned file whole.
@@ -16,8 +23,8 @@ cold read. Read no outside artifact for a cold reaction: {{ISOLATION_BOUNDARY}}.
 {{PASTE_FILLED_CREDENTIALS_NOTE}}
 TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_RESULTS}}. Execute probes here before
 job work; save exact commands/output/errors/exits. Refusal is a SETUP DEFECT.
-If inherited instructions require extra inputs, report the scope conflict first;
-do not widen a narrow assignment's inputs or silently perform outside work.
+After reading, report prospective instruction/scope conflicts before extra inputs;
+do not choose to widen the assignment's inputs or silently perform outside work.
 
 BACKGROUND: {{PLAIN_WORDS_AND_DELIBERATE_CHANGE}}.
 PROMISE: {{CONTRACT}}. History is a claim to verify: {{PRIOR_CLAIMS_OR_NONE}}.

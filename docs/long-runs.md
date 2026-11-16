@@ -1,8 +1,12 @@
 # Long runs: work that outlives one context
-EXPERIMENTAL. First-use trials passed: none. Two Codex trials failed; corrections await re-trial.
+EXPERIMENTAL. First-use trials passed: none. Three Codex trials failed; corrections await re-trial.
+
+Harness/operator standing instructions may impose actions before you read this procedure/brief.
+Record known actions, paths and imposing source (unknown if unobserved) as environment facts in STATE.md or report/final message, outside fixed-format artifacts.
+They are not violations or grounds to object/stop. Choices after reading obey this procedure/brief.
 
 Bootstrap on first use and every resume; never stop because literals are absent:
-1. The first command lists credential-shaped environment NAMES ONLY, never values.
+1. The first chosen command after reading lists credential-shaped env NAMES ONLY, never values.
    Only this listing may run unprefixed and before TMP/TEMP are set; use a supplied
    prefix if available. No other unprefixed command, including reads or tool lookups.
    Bash: `python3 -I -c 'import os,re; print("\n".join(sorted(n for n in os.environ if re.search("KEY|TOKEN|SECRET|PASSWORD",n,re.I))))'`.
@@ -18,9 +22,8 @@ Bootstrap on first use and every resume; never stop because literals are absent:
    check below before creating directories. All later commands carry REMOVE_ENV.
 Record effective literals/origin in the first state/recovery update; a one-line prompt needs only the run path.
 
-For Claude Code, Codex CLI or Gemini CLI sessions launching/resuming workers across context windows.
-Workers are subagents, headless builders or readers. Read whole before starting
-and after context loss. Nothing needed to resume lives only in the conversation.
+For Claude Code, Codex CLI or Gemini CLI sessions launching/resuming subagents, builders or readers.
+Read whole before work/after context loss; nothing needed to resume lives only in conversation.
 
 ## Three rules to keep before reading further
 
@@ -86,15 +89,16 @@ availability under AUTH before launch. Bootstrap supplies no permissions or laun
    `not yet tried` or `unavailable`; do not leave a runnable-looking guess.
    Each command starts in `<run>`; include known literals, but allow this prompt:
 
-   > First list credential-shaped environment names only (sole unprefixed exception).
-   > Derive missing prefix and absolute `<run>/tmp/` per Bootstrap; create temp dirs prefixed.
-   > Read `<procedure>` whole, then STATE.md/RULES. Recover `<run>`; capture arrivals before replying.
+   > Read `<procedure>` whole. Prior harness/standing-instruction actions are
+   > environment facts, not violations. Bootstrap next, then read STATE.md/RULES.
+   > Recover `<run>`; capture arrivals and refresh Now before chosen replies.
 
    Record the absolute STATE.md path at ENTRYPOINT, outside the run folder,
    within authorized writes (for example, the host's existing task description).
    A takeover invocation or handoff must include that path. If no durable
    pointer can be written, deliver the absolute path in the handoff and record
    that limitation; a session given neither pointer nor run path cannot resume.
+   The launching party saves the actual start/takeover command, prompt and input-file list; unobserved context stays unverified.
 
 5. Apply REMOVE_ENV before launch; repeat the names-only check in the started
    session using Bootstrap or the host's check. Settings/rebuilt environments may
@@ -126,20 +130,16 @@ availability under AUTH before launch. Bootstrap supplies no permissions or laun
   jobs/<job>/        PROMPT.md, input copies, isolated clone if needed, outputs, tmp/
 ```
 
-The Now block is rewritten at every update. It holds the machine-clock date,
-time and timezone; base ref and sha; every branch and tip the run moves;
-worktree paths and sole owners; authorized heavy runs; next action; and one
-row per in-flight job, including coordinators and integration jobs.
-Each row holds kind, handle, lineage/model, folder, brief, expected output,
-start time and coordinator if any. Use actual returned handles, never invented ones.
+Rewrite Now at every update: clock date/time/zone, base ref/sha, branch tips;
+worktrees/owners, heavy-run grants, next action and rows including coordinators/integration.
+Each row: kind, actual handle (pending until returned), lineage/model, folder, ONE governing brief,
+output, start time, coordinator. Never invent handles or select a brief from history.
 A row leaves Now only after its result is recorded in an update.
 
-Current: STATE.md's Host slots, start/resume commands and Now; PROGRESS.md's
-count/counting rule, start/resume commands and Human actions. Rewrite these on
-resume to match observed current paths/state. History: STATE's creation header
-and Updates; PROGRESS's Integrated or handed back and Decisions you can reverse.
-Never rewrite history, including old roots, evidence paths, decisions or handoffs.
-Other event narratives remain history unless explicitly labelled current.
+Current: STATE.md's Host slots/start commands/Now; PROGRESS.md's count/rule/start commands/Human actions.
+Rewrite those on resume to observed paths/state. History: STATE's creation header/Updates
+and PROGRESS's Integrated or handed back/Decisions you can reverse.
+Never rewrite history (old roots, evidence paths, decisions/handoffs); other event narratives stay history unless labelled current.
 Append corrections/reversals. For a copied run, record the old-to-new root mapping
 in a new update; translate paths for current access only, never global-replace files.
 
@@ -201,11 +201,11 @@ taking over. Memory and a compaction summary are pointers, not current state.
    append evidence-based corrections for omissions, never invent a prior RAN.
 5. Capture any arrived, unrecorded result as the first recovery writes to the
    round file and STATE update, before path rebasing, other mutations or any
-   recovery/work reply. Reading evidence first is allowed. Capture objections
+   chosen recovery/work reply. Reading evidence first is allowed. Capture objections
    and failed checks too; process exit zero alone is not task success. Write
-   `Update N - context lost; state re-read from disk` before the first work
-   reply. List checks, disagreements and unknowns; rewrite Now to match
-   observed facts; update only current sections using the recorded root mapping.
+   `Update N - context lost; state re-read from disk` and refresh Now together,
+   before any chosen reply, not in a later update. List checks/disagreements/unknowns;
+   update only current sections from observed facts and the recorded root mapping.
    After capture, recheck TOOLS probes if the runner/setup changed, before job work.
    Do not repeat a build, review or integration whose result already exists.
 
@@ -248,18 +248,18 @@ for the missing fact. Do not fill it from a summary or relaunch on a guess.
    map the recorded job root to the current brief folder; preserve original text.
    Keep a relative stop rule relative, with the measurements it compares.
    A predicted budget is not a hard ceiling unless the brief explicitly says so.
-   Resolve inherited-instruction/scope conflicts before launch; extra instruction
-   reads do not expand a narrow job's input scope. Report unresolved conflicts.
-4. Launch with "Bootstrap, then read `<run>/jobs/<job>/PROMPT.md` whole and follow
-   it." Include known literals as a convenience, never a prerequisite. Probe TOOLS.
-   The host launcher may append sandbox restrictions. Save the command,
-   returned handle, model, start time, output paths and expected terminal
-   marker in Now immediately. Record launch intent before invoking it so a
-   loss between launch and handle recording leaves a discoverable job.
-5. A correction is a new PROMPT_R2.md and a one-line instruction to read it.
-   On return, require acknowledgement that it was read. Preserve earlier briefs.
-   Resume a live resumable thread for follow-up; record replacement and reason
-   when the old host/session cannot resume it.
+   Imposed pre-read actions are environment facts, not scope violations or blockers.
+   After reading, choices obey the brief; report prospective scope conflicts first.
+4. Before launch, write/map the Now row's ONE governing brief path and pending handle.
+   Whoever launches, including an external party, reads that row and launches exactly
+   its named file; never default to PROMPT.md or choose a filename from history.
+   Send "Bootstrap, then read `<row's brief>` whole and follow it." Known literals are a convenience; probe TOOLS. Launcher restrictions may be appended.
+   Save actual command, returned handle/model, start time, output paths and terminal
+   marker immediately; launch intent remains discoverable if no handle was returned.
+5. Save prior content as history. Revise the named file in place or write PROMPT_R2.md
+   and update the row before handoff/launch; record the revision.
+   Tell an existing worker to read that selected file; require its file/revision
+   acknowledgement on return. Resume its thread; record replacement if it cannot resume.
 6. A builder writes BUILD_REPORT.md starting `BUILT (<n> commits, tip <sha>)`
    or `STOPPED - <one clause>` and returns a git bundle. A reader writes its
    assigned report ending `VERDICT: APPROVE` or `VERDICT: OBJECT - <findings>`.
@@ -368,7 +368,7 @@ Resolve paths. Add this line to AGENTS.md (Codex) or GEMINI.md (Gemini), replaci
 the placeholders; missing bootstrap literals are derived, never requested:
 
 ```text
-For worker sessions outliving context or resuming them: first list credential-shaped environment names only (the sole unprefixed exception); derive any missing env -u prefix and absolute run/tmp as Bootstrap in <procedure> directs, create temp directories prefixed, then read/follow it. Supplied current values win; absence never requires asking.
+For worker sessions outliving context or resuming them: read <procedure> whole; imposed earlier actions are environment facts, not violations or stop reasons. Then Bootstrap (names-only listing is the sole chosen unprefixed exception), derive missing prefix/absolute run/tmp, create temp dirs prefixed, and follow it. Supplied current values win; absence never requires asking.
 ```
 
 Fill LAUNCH from the installed host's instructions without guessing new flags.

@@ -1,6 +1,6 @@
 # Found on the way
 
-First list credential-shaped env names only (sole unprefixed exception), then use
+After reading, first chosen command lists credential-shaped env names only (sole unprefixed exception); then use
 supplied values or derive env -u per name and absolute run/tmp; create it prefixed. Never stop for absent literals.
 Add an entry when discovered. Use timestamps inside this file, never mtime.
 Keep the entry after filing; a draft is owed until its home is confirmed.
