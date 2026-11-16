@@ -3,6 +3,7 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  PUT_BACK_DEFAULTS,
   register,
   resolveHookConfig,
   summarize,
@@ -54,8 +55,23 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', dropCalls: false });
+    expect(resolveHookConfig({})).toEqual({
+      compactAtPercent: 60,
+      minReductionRatio: 0.25,
+      model: 'jev-latest',
+      dropCalls: false,
+      note: true,
+      ignoredOptions: [],
+      ...PUT_BACK_DEFAULTS,
+    });
     expect(resolveHookConfig({ dropCalls: true }).dropCalls).toBe(true);
+    expect(resolveHookConfig({ note: false }).note).toBe(false);
+    expect(resolveHookConfig({ putBackBudget: 5, reportHeadChars: 6, taskHeadChars: 7, hostLineChars: 8 })).toMatchObject({
+      putBackBudget: 5,
+      reportHeadChars: 6,
+      taskHeadChars: 7,
+      hostLineChars: 8,
+    });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
     ).toEqual({
@@ -67,6 +83,9 @@ describe('hook config', () => {
       compactAtPercent: 60,
       minReductionRatio: 0.25,
       dropCalls: false,
+      note: true,
+      ignoredOptions: [],
+      ...PUT_BACK_DEFAULTS,
     });
   });
 });

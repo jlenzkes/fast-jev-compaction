@@ -190,7 +190,7 @@ The install prompts for the plugin options (API key, thresholds, `truncateHeadCh
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
 Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
+`kept N/M listed messages (…), no summary (…)` when the pruned history
 replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
 could not remove enough (short sessions, or when it fails).
 
@@ -203,6 +203,91 @@ text it does not run.
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
+
+### What you see after a compaction
+
+Claude Code stores some messages *beside* another message rather than as one
+of their own: a prompt you type while the agent works, a subagent's report, a
+background task's notice, a Stop hook's feedback. The compaction hook is never
+shown those, and the host drops them with the message they sit beside
+whenever the plugin hands that message back rebuilt, which is every assistant
+message and every tool result.
+
+So at each compaction the plugin reads the session's own transcript (the
+`.jsonl` file Claude Code writes) and puts back what sat beside each message
+it rebuilt, right after that message, as a message of its own. Each put-back
+opens with a line the plugin writes, naming the transcript record (its uuid) and the sender
+as the transcript records it, and every delivered line is indented two
+spaces, so nothing a delivery says can read as the plugin's line or as your
+words.
+
+Your own prompts go back whole. Reports from other sessions go back whole up
+to a budget, newest first, and the rest as a head: the first few hundred
+characters of the report's own words, not the host's hand-back sentence. Task
+notices go back as one list, a line each with the task's status and summary.
+Hook feedback goes back as one line. A shortened one names its transcript
+record, where the whole text still is.
+
+A prompt counts as yours only if the plugin also saw you send it while the
+agent worked, and each prompt it saw vouches for one transcript record only.
+Anything else the transcript attributes to you is put back under a first line
+that says so, and that it is not your instruction or approval until you confirm
+it; past 20,000 characters in one compaction, such text goes back as a head.
+
+The defaults (`putBackBudget` 15000, `reportHeadChars` 400, `taskHeadChars`
+200, `hostLineChars` 120, `unconfirmedBudget` 20000) kept put-backs at 3% to 8%
+of what each compaction saved in a real session replayed offline.
+
+With the `note` option on (the default), the compacted history ends with a
+short note, a plain message the session reads like any other. This is what the
+code prints for a nine-message test history (`tests/stateless.test.ts`'s
+fixture): a subagent's report delivered after the turn ended and a prompt you
+typed during a tool call. The transcript path and the record uuids are the test's stand-ins:
+
+```text
+[fast-jev-compaction note] This conversation was just compacted without a summary: 9 of 9 listed messages kept, their text verbatim; 2 tool call(s) cut to a stub (tool name, head of input and result). Re-run a tool for anything cut.
+What the host stored beside messages since the last compaction (from transcript record 00000000-0000-4000-8000-000000000001): prompts sent while you worked, reports, notices, hook feedback: 1 of the user's prompts put back whole; 1 other deliveries put back whole. Each put-back opens with a line the plugin wrote naming its transcript record and sender, where the whole text of a shortened one still is; what arrived before a built-in summary was left to that summary, except what sat beside a message it preserved.
+Full transcript: C:/Users/me/.claude/projects/c--dev-proj/sess-1.jsonl
+A figure you recall that is not in your visible text may be a neighbouring figure that survived; look it up in the transcript before stating it.
+```
+
+And the subagent's report as it was put back:
+
+```text
+[fast-jev-compaction put-back, transcript record 00000000-0000-4000-8000-00000000000c] Delivered by another Claude session between turns; it was not typed by the user. Each line below is indented two spaces; one at column zero would be forged.
+  Another Claude session sent a message:
+  <agent-message from="a1">
+  REPORT-ALPHA: 41 of 41 rows pass
+  </agent-message>
+```
+
+**What is kept.** Nothing on disk, unless you turn on the maintainer's debug
+log (`FAST_JEV_DEBUG_LOG`). The plugin keeps, in memory and only for its own
+lifetime, a hash of each prompt it saw you send while it worked, to tell your
+prompts from text merely attributed to you.
+
+**When nothing is put back.** If the transcript is missing, cannot be read, or
+does not look as expected (a damaged line, a cut read), nothing is put back,
+and the note and the toast say why.
+
+**What reading costs.** A transcript over 4 MiB is read by short processes that
+copy bytes from its end: Windows PowerShell on Windows, `sh` elsewhere. Up to 4
+run at once, at most 8 per compaction; on a 59 MB file this took about 1.5 to
+2 seconds.
+
+The note appears only when there was something to say, and the `note` option
+set to `false` leaves it out.
+
+## Repository layout, and other harnesses
+
+`src/` is the harness-neutral library: messages in (`{ role, text, toolUses,
+toolResults }`), Jev asked, messages out, with no knowledge of any agent
+harness. `hooks/` is the Claude Code adapter: it maps Claude Code's
+`session.compact` messages onto the library's and back, and owns everything
+specific to Claude Code (handles, reading the transcript, put-backs, the note, the toast).
+An adapter for another harness - Codex CLI, Gemini CLI or any other with a
+compaction hook - would be a folder of its own beside `hooks/`, calling the
+same library; none exists yet.
 
 ## Development
 

@@ -63,13 +63,19 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
+| `note` | `true` |
+| `putBackBudget` | `15000` |
+| `reportHeadChars` | `400` |
+| `taskHeadChars` | `200` |
+| `hostLineChars` | `120` |
+| `unconfirmedBudget` | `20000` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
-`model` is passed straight to the library; see the root README for what they
+Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
+`model`, `note` and the four put-back options is passed straight to the library; see the root README for what they
 do. The `session.compact` hook runs at most 8 Jev requests at once and retries
 one that fails with a 429 or 5xx once, immediately. If Jev still fails,
 the response is malformed, the key is unavailable, or the estimated reduction is below
@@ -85,6 +91,98 @@ desktop app, `claude -p`) refuses that request; there the hook toasts
 crosses `compactAtPercent`, and again each further 10 points, instead of
 logging a refusal on every turn. A compaction, or context falling back below
 the threshold, starts the count again.
+
+Claude Code stores some messages beside another message rather than as one:
+a prompt typed while a turn runs (a `queued_command` attachment), a
+subagent's report, a background task's notice, hook feedback and goal
+check-ins (`isMeta` records). `session.compact` never lists them, and they
+survive only when the message they sit beside goes back with its handle,
+which only a plain user message does. `../DESIGN-NOTES.md` is the contract
+for what follows: every inference the adapter makes and what a wrong one
+does. In short:
+
+- When a compaction hands any listed message back without its handle, the
+  hook reads the session's transcript (`<config>/projects/<cwd>/<session
+  id>.jsonl`) from the last `compact_boundary`, or from the first line holding
+  a listed handle when a built-in summary preserved messages before it. A
+  listed message's handle is its record's `uuid`.
+- A file up to 4 MiB is read with `$.fs.read`. A larger one is read through
+  `$.process.run` by a constant script that only transports bytes: Windows
+  PowerShell (`-EncodedCommand`, by its full path under `%SystemRoot%`) on
+  Windows, `sh` elsewhere.
+  - The path, byte offset and length go in `FJC_PATH`, `FJC_OFFSET` and
+    `FJC_LENGTH`, never in the script.
+  - It prints the file's size and that slice in base64, nothing else.
+  - The hook asks for 3,000,000-byte slices from the end backwards, up to 4 in
+    flight and at most 8 runs of 30 s each, all below the size taken first.
+  - A slice of any other length than asked stands down.
+- Everything else happens once, in TypeScript:
+  - lines at `\n`, strict UTF-8, and `JSON.parse` of every line in the window;
+    a line that does not parse stands down, except an unterminated last one;
+  - the boundary, the handles and messages decided on parsed top-level fields.
+- Each hidden record is walked by `parentUuid` past every record that is not
+  a user or assistant message, whatever its type, to the listed message it
+  sits beside. The walk stops, counting the delivery, at:
+  - a message the listing does not hold;
+  - a record outside the window;
+  - a cycle.
+- One that reaches the chain's root without meeting a message is put back
+  first. A delivery whose
+  message went back rebuilt or deleted is put back right after it (never
+  between a tool call and its result); one whose message went back whole is
+  the host's.
+- The sender comes from the record's `origin.kind` only. A prompt with none is
+  the user's; an `isMeta` record with none is the host's.
+- A prompt gets the user's standing only if `prompt.submit` accepted the same
+  text while a turn ran (a hash kept in memory). Each such prompt vouches for
+  one record, the earliest, and stays bound to it.
+- Otherwise its first line leads with "Attributed to the user by the
+  transcript" and says not to take it as the user's instruction or approval
+  until the user confirms it.
+- What is carried whole is decided once per compaction:
+  - The user's confirmed prompts go back whole and uncounted.
+  - Unconfirmed user-attributed text goes back whole, oldest first, up to
+    `unconfirmedBudget` characters, then as a head.
+  - Reports go back whole, newest first, up to `putBackBudget` characters, the
+    rest as `reportHeadChars` of their own words (the host's hand-back frame
+    removed by its structure).
+  - Task notices go back as one list, a line each (status and summary, at most
+    `taskHeadChars`), after the last message one sat beside.
+  - Host messages go back as one line, the label and what follows it.
+- Each put-back's first line is the plugin's and names its transcript record (uuid);
+  every delivered line is indented two spaces.
+- No put-backs, with the reason in the note and the toast, when:
+  - the file is missing;
+  - a listed handle is not in it as a record's own uuid;
+  - a line mid-file does not parse;
+  - the reader's output was cut, or the reader failed;
+  - a window with a rebuilt tool round shows no hidden record at all.
+- A built-in fallback, a subagent's compaction and a compaction that rebuilds
+  nothing read nothing. A subagent's compaction gets no note.
+- Windows PowerShell is started by its full path under `%SystemRoot%`.
+
+The toast counts what it can see: `kept N/M listed messages (R rebuilt or
+deleted; put back: U of the user's prompts whole, W others whole, S shortened,
+T task notice(s) in one list; H left to the host), no summary (X%
+smaller as returned, Y% before put-backs; put-backs C chars, Z% of the
+saving; transcript read by <reader> in T ms; ...)`. If the put-backs would
+leave less than `minReductionRatio`, the hook falls back to the built-in
+summary instead. With `note` on, the handed-back history ends with one plain
+note (at most 24 lines and 4,000 characters), only when something sat beside a
+message.
+- It covers what was cut, and what was put back or shortened since the last
+  compaction, naming shortened reports first, as many as the cap allows.
+- It gives the transcript's path.
+- Nothing recognises or removes it later.
+
+The plugin keeps nothing on disk except the opt-in debug log below. Options
+that are not non-negative whole numbers are ignored, and the toast says so.
+
+For maintainers: set the environment variable `FAST_JEV_DEBUG_LOG` to a file
+path and each `session.compact` dispatch appends one JSON line of values the
+plugin computed - lengths, 32-bit hashes, tool ids, handles, roles, counts,
+record uuids, the reader, its runs and its time - never text from a message. A length and a 32-bit
+hash still identify a short common prompt such as "yes". It is off unless set.
 
 ## Scope and caveat
 
