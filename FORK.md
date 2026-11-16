@@ -25,7 +25,8 @@ Based on upstream `e3f262a7` (main as of 18 Sep 2026). Upstream's history is unt
 **9. Long runs (experimental).** The [procedure](docs/long-runs.md), adjacent
 [templates](docs/long-runs/templates/) and Claude Code [skill](skills/long-runs/SKILL.md)
 keep worker state on disk across context loss, with or without Jev.
-No lineage has passed a first-use trial of this generic version yet.
+It has passed a first-use trial with Codex (GPT lineage) only: fresh sessions
+resumed a scripted job from the run folder alone, graded against a sealed key.
 
 The plugin's tests were brought in line with changes 1 and 3, which upstream's tests still assert against.
 

@@ -1,5 +1,5 @@
 # Long runs: work that outlives one context
-EXPERIMENTAL. First-use trials passed: none. Four Codex trials failed; corrections await re-trial.
+EXPERIMENTAL. First-use trials passed: Codex (GPT lineage), on the fifth trial, after four failed and were corrected. Claude and Gemini: not yet tried.
 
 Harness/operator standing instructions may impose actions before you read this procedure/brief.
 Record known actions, paths and imposing source (unknown if unobserved) as environment facts in STATE.md or report/final message, outside fixed-format artifacts.
@@ -319,7 +319,7 @@ run folder with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` to load added
 instructions. Project settings did not load from that added directory, while
 session settings could restore environment values. Do not assume added-directory
 instructions imply hooks or permissions. Other Claude launch arrangements:
-not yet tried here. This generic procedure's first-use trial: not yet tried.
+not yet tried here. This generic procedure's Claude first-use trial: not yet tried.
 
 ## Codex CLI (GPT lineage)
 
@@ -339,8 +339,8 @@ the job folder and could not stop processes it started; those actions were
 deferred to TO_RUN_OUTSIDE.md. It used a checked full interpreter path after
 command lookup failed. Usage-limit messages ended the attempt, not a wait.
 The source still lists real-Codex wrapper use as unproven. Other sandbox behavior
-and direct headless syntax: not yet tried here. This procedure's first Codex trial
-failed; corrections await re-trial. Do not generalize source environment limits.
+and direct headless syntax: not yet tried here. This procedure passed a Codex
+first-use trial on its fifth attempt. Do not generalize source environment limits.
 
 ## Gemini CLI
 

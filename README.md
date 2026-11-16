@@ -145,8 +145,8 @@ current state on disk so a fresh session can resume after compaction or restart.
 It includes [templates](docs/long-runs/templates/) and a Claude Code
 [skill entrypoint](skills/long-runs/SKILL.md). Codex CLI and Gemini CLI setup
 is in the procedure. It works with Jev or built-in compaction.
-This is experimental: no lineage has passed a first-use trial of this generic
-version yet. Host launch, review and integration policies must be supplied.
+This is experimental: it has passed a first-use trial with Codex (GPT lineage)
+only; Claude and Gemini are not yet tried. Host launch, review and integration policies must be supplied.
 
 ## Claude Code plugin
 
