@@ -1,5 +1,5 @@
 # Long runs: work that outlives one context
-EXPERIMENTAL. First-use trials passed: none. Three Codex trials failed; corrections await re-trial.
+EXPERIMENTAL. First-use trials passed: none. Four Codex trials failed; corrections await re-trial.
 
 Harness/operator standing instructions may impose actions before you read this procedure/brief.
 Record known actions, paths and imposing source (unknown if unobserved) as environment facts in STATE.md or report/final message, outside fixed-format artifacts.
@@ -56,7 +56,7 @@ Before work, fill STATE.md's slots. Examples give shapes, not plugin-supplied co
 | REMOVE_ENV | supplied prefix or bootstrap-derived names and prefix | `env -u EXAMPLE_TOKEN` in a POSIX shell |
 | AUTH | any credential exception, network and sandbox grants by task | none; offline worker with writes only in its job folder |
 | LAUNCH | installed CLI paths, models, start/resume commands, environment controls | host-checked command per lineage, with output and exit-status files |
-| TOOLS | every declared executable, actual runner, safe probe and expected result | `git --version`; an interpreter's harmless print snippet |
+| TOOLS | every declared executable, actual runner, safe probe and expected token | `git --version`; an interpreter's harmless print snippet |
 | ENTRYPOINT | durable pointer by which a new session finds the active run | task description containing the absolute STATE.md path |
 
 Use `none` where a slot truly does not apply, with a reason. Derive missing
@@ -109,14 +109,14 @@ availability under AUTH before launch. Bootstrap supplies no permissions or laun
 6. Keep the orchestrator's working directory at `<run>`. Workers write only
    their assigned job folders or isolated clones. Record Update 1 and the Now
    block before the first work report. No access grant flows from parent to child.
-7. The first session must execute every host-declared TOOLS probe with REMOVE_ENV
-   before the first job step, in its actual runner/sandbox; lookup is insufficient.
-   Test interpreters with harmless snippets, not job calculations. Workers must
-   also probe their declared tools in their own runner before their first job step.
-   Record exact commands, stdout/stderr, exit/refusal and runner in STATE.md.
-   A refusal or mismatch is a SETUP DEFECT, not a job failure: block dependent
-   work, request corrected setup, and verify it before continuing. Never silently
-   substitute a tool or label a substitute check as the required check's success.
+7. First session and workers execute declared TOOLS probes with REMOVE_ENV before
+   job work in their actual runner/sandbox; lookup is insufficient. Use harmless snippets.
+   Minimum PASS: tool starts, exits 0, and output contains the expected token after
+   normalizing CRLF/LF and trimming trailing whitespace on every line and at the end (output and token).
+   Line-ending/whitespace-only differences are PASS with a recorded note, never a stop.
+   Probes are never byte-exact; sessions must not add stricter probe rules to briefs.
+   Byte-exact deliverables come only from the job, never session invention. Save commands, raw output/error, exit/runner and normalized verdict.
+   Failure to start, nonzero exit or missing normalized token is a SETUP DEFECT: block dependent work until corrected setup is verified, not a job failure. No silent tool substitutions or job calculations as probes.
 
 ## The run folder and state
 

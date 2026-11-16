@@ -16,8 +16,12 @@ Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. TMP/TEMP: literals above, else absol
 Allowed commands, bounds and sandbox: {{COMMANDS_BOUNDS_AND_AUTH_OR_READ_ONLY}}.
 
 {{PASTE_FILLED_CREDENTIALS_NOTE}}
-TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_RESULTS}}. Execute probes here before
-job work; save exact commands/output/errors/exits. Refusal is a SETUP DEFECT.
+TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_TOKENS}}. Run before job work.
+Minimum PASS: tool starts, exits 0, and output contains its expected token after
+CRLF/LF normalization and trimming trailing whitespace per line and at the end (output/token). Formatting-only
+differences are PASS with a note, never a stop. No byte-exact or stricter probes
+than the procedure; byte-exact deliverables come only from the job. Save commands,
+raw output/errors/exits and verdicts. Real failures are SETUP DEFECTS, not job failures.
 After reading, report prospective instruction/scope conflicts before extra work;
 do not choose to widen the assigned input scope.
 

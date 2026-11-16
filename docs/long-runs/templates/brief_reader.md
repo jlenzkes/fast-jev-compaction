@@ -21,8 +21,12 @@ Disclose inherited conversation, instructions and memory before claiming a
 cold read. Read no outside artifact for a cold reaction: {{ISOLATION_BOUNDARY}}.
 
 {{PASTE_FILLED_CREDENTIALS_NOTE}}
-TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_RESULTS}}. Execute probes here before
-job work; save exact commands/output/errors/exits. Refusal is a SETUP DEFECT.
+TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_TOKENS}}. Run before job work.
+Minimum PASS: tool starts, exits 0, and output contains its expected token after
+CRLF/LF normalization and trimming trailing whitespace per line and at the end (output/token). Formatting-only
+differences are PASS with a note, never a stop. No byte-exact or stricter probes
+than the procedure; byte-exact deliverables come only from the job. Save commands,
+raw output/errors/exits and verdicts. Real failures are SETUP DEFECTS, not job failures.
 After reading, report prospective instruction/scope conflicts before extra inputs;
 do not choose to widen the assignment's inputs or silently perform outside work.
 

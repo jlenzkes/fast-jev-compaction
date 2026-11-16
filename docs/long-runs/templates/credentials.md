@@ -12,9 +12,10 @@ before other reads/probes/work. Missing literals never require a stop or questio
 - A launcher stripping names does not prove settings or a rebuilt environment
   did not restore them. Use the host's names-only check; report unexpected
   names and stop affected commands until removal or an authorized exception.
-- Execute declared tool probes in this runner before job work; save the exact
-  command, output/error and exit/refusal. Refusal is a SETUP DEFECT, not a job
-  failure. If not invoked, say NOT RUN; never claim an uncaptured tool error.
+- Probe minimum only: starts, exits 0, expected token in output after CRLF/LF and
+  trimming trailing whitespace per line and at the end (output/token). Formatting-only differences
+  PASS with a note, never stop; no byte-exact/stricter probe rules in briefs.
+  Byte-exact deliverables come only from the job. Save commands/output/errors/exits/verdicts; real failures are SETUP DEFECTS. Uninvoked checks are NOT RUN; never claim uncaptured tool errors.
 - Never print the environment or configuration dumps, and never open a
   credential-bearing file. Never quote a suspected secret in output; report
   only where it appeared. Do not infer that matching names finds every secret.

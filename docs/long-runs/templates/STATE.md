@@ -15,7 +15,7 @@ Original procedure (history): {{PROCEDURE_ABSOLUTE_PATH}}. Read the invocation's
 - REMOVE_ENV: {{NAMES_ONLY_AND_EXACT_PREFIX}}
 - AUTH: {{TASK_SCOPED_ENVIRONMENT_NETWORK_SANDBOX_GRANTS_OR_NONE}}
 - LAUNCH: {{CLI_PATHS_MODELS_COMMANDS_ENVIRONMENT_CONTROLS}}
-- TOOLS: {{EXECUTABLES_RUNNERS_SAFE_PROBES_EXPECTED_RESULTS_AND_RECEIPTS}}
+- TOOLS: {{EXECUTABLES_RUNNERS_SAFE_PROBES_EXPECTED_TOKENS_AND_RECEIPTS}}
 - ENTRYPOINT: {{DURABLE_HOST_POINTER_TO_THIS_STATE_FILE}}
 - Names-only credential check in started shell: {{TIME_NAMES_AND_ACTION}}
 
@@ -49,7 +49,7 @@ Append before reporting a state change; use the machine clock.
 On resume, capture/update Now together before chosen replies/rebasing; append the old-to-new root mapping and imposed pre-read actions/paths.
 Record last saved STATE update/time versus internal FOUND/round times, order/missing events and every finding's voice/home.
 Recovery receipt: `STATE N @time | FOUND @time/none | rounds @times/none | order/missing events | voices/homes checked`.
-Record executed tool probes and errors; refusals are setup defects, not job failures.
+Record tool starts/exits, raw output, normalized token verdict and formatting-only PASS note; no byte-exact/stricter probe rules, only real failures are setup defects.
 Record ONE governing brief path/launch intent before invocation; revise in place or update that path before launch; then record the returned handle.
 Record worker results on arrival, including evidence and checks not run.
 Before context loss, state conditions on disk, not unconditional old orders.

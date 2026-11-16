@@ -25,9 +25,13 @@ Allowed writes: {{PATHS}}. Processes/waits: {{BOUNDS_AND_CLEANUP_OR_NO_PROCESSES
 
 READ FIRST: {{INPUT_FILES_AND_HOST_RULES}}. Claims are questions to verify,
 not facts to repeat. Record each answer and its file:line witness.
-TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_RESULTS}}. Execute probes here before
-job work; save exact commands/output/errors/exits. Refusal is a SETUP DEFECT,
-not job failure. After reading, report prospective instruction/scope conflicts before extra reads or work.
+TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_TOKENS}}. Run before job work.
+Minimum PASS: tool starts, exits 0, and output contains its expected token after
+CRLF/LF normalization and trimming trailing whitespace per line and at the end (output/token). Formatting-only
+differences are PASS with a note, never a stop. No byte-exact or stricter probes
+than the procedure; byte-exact deliverables come only from the job. Save commands,
+raw output/errors/exits and verdicts. Real failures are SETUP DEFECTS, not job failures.
+After reading, report prospective instruction/scope conflicts before extra reads or work.
 
 COMMITS, in order:
 {{EACH_COMMIT_MESSAGE_FILES_EXACT_EDIT_HARD_CEILINGS_PREDICTIONS_AND_CHECKS}}
