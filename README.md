@@ -285,9 +285,35 @@ toolResults }`), Jev asked, messages out, with no knowledge of any agent
 harness. `hooks/` is the Claude Code adapter: it maps Claude Code's
 `session.compact` messages onto the library's and back, and owns everything
 specific to Claude Code (handles, reading the transcript, put-backs, the note, the toast).
-An adapter for another harness - Codex CLI, Gemini CLI or any other with a
-compaction hook - would be a folder of its own beside `hooks/`, calling the
-same library; none exists yet.
+### Why the plugin is Claude Code only
+
+The library would serve any harness, but an adapter needs one thing from the
+harness: a hook, run when it compacts, whose return value *becomes* the
+history the session keeps. Claude Code's `session.compact` is that hook. We
+looked for it in three others in November 2026, reading each one's hook
+reference and the source that consumes the hook's result:
+
+- **Codex CLI.** `PreCompact` receives a transcript path, not the messages,
+  and its output may only stop compaction or add a message; the runtime reads
+  the result as continue or stop and installs no returned history
+  ([hooks reference](https://learn.chatgpt.com/docs/hooks)).
+- **Gemini CLI.** `PreCompress` may only show a message; the compression
+  service discards its result and builds its own history. `BeforeModel` can
+  edit one request, but only its text parts, so it cannot remove tool calls
+  and results the way this library does
+  ([hook reference](https://geminicli.com/docs/hooks/reference/)).
+- **Antigravity.** Its plugin hooks have no compaction event; the SDK's
+  compaction hook is read-only, for logging and metrics
+  ([building plugins](https://antigravity.google/docs/build-plugins)).
+
+In each, a hook could save a pointer or a few facts before the harness's own
+summary runs, but nothing can make the harness keep the verbatim, pruned
+history this plugin keeps. So we build no adapter for them: it would be a
+different and weaker tool under this one's name. Rewriting a stopped
+session's saved history on disk might work for a pinned version of one
+harness; it is untried. If a harness adds a hook that may return replacement
+history, an adapter becomes a folder of its own beside `hooks/`, calling the
+same library.
 
 ## Development
 
