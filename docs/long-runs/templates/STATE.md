@@ -1,9 +1,11 @@
 # Run state: {{GOAL}}
 
-Created: {{CLOCK_DATE_TIME_ZONE}}. Repository: {{REPO}}. Run: {{RUN}}.
-Procedure: {{PROCEDURE_ABSOLUTE_PATH}}. Read it whole before acting.
+Before the very first command, including reads: use the invocation's literal
+REMOVE_ENV prefix and job-local TMP/TEMP. If missing, ask without a command.
+History, never rewrite: created {{CLOCK_DATE_TIME_ZONE}}; original repo {{REPO}}; original run {{RUN}}.
+Original procedure (history): {{PROCEDURE_ABSOLUTE_PATH}}. Read the invocation's current copy whole.
 
-## Host slots
+## Host slots (current; rewrite on resume)
 
 - REPO / BASE / RULES: {{PATH_REF_AND_INSTRUCTION_FILES}}
 - REVIEW: {{READERS_RECHECKS_EXCEPTIONS_AND_EVIDENCE}}
@@ -13,10 +15,11 @@ Procedure: {{PROCEDURE_ABSOLUTE_PATH}}. Read it whole before acting.
 - REMOVE_ENV: {{NAMES_ONLY_AND_EXACT_PREFIX}}
 - AUTH: {{TASK_SCOPED_ENVIRONMENT_NETWORK_SANDBOX_GRANTS_OR_NONE}}
 - LAUNCH: {{CLI_PATHS_MODELS_COMMANDS_ENVIRONMENT_CONTROLS}}
+- TOOLS: {{EXECUTABLES_RUNNERS_SAFE_PROBES_EXPECTED_RESULTS_AND_RECEIPTS}}
 - ENTRYPOINT: {{DURABLE_HOST_POINTER_TO_THIS_STATE_FILE}}
 - Names-only credential check in started shell: {{TIME_NAMES_AND_ACTION}}
 
-## Start or resume the orchestrator
+## Start or resume the orchestrator (current; rewrite on resume)
 
 Working directory: {{RUN}}. Each available command applies REMOVE_ENV and
 passes the procedure's start prompt. Mark unavailable/untried commands plainly.
@@ -25,9 +28,7 @@ passes the procedure's start prompt. Mark unavailable/untried commands plainly.
 - Codex CLI: {{EXACT_COMMAND_OR_UNAVAILABLE}}
 - Gemini CLI: {{EXACT_COMMAND_OR_UNAVAILABLE}}
 
-## Now
-
-Rewrite at every update; preserve the updates below.
+## Now (current; rewrite at every update and on resume)
 
 - Updated: {{CLOCK_DATE_TIME_ZONE}}
 - Base ref and sha: {{REF_SHA}}
@@ -42,9 +43,14 @@ Rewrite at every update; preserve the updates below.
 
 A row leaves Now only after its result is recorded below.
 
-## Updates
+## Updates (history; append only, never rebase old paths or handoffs)
 
 Append before reporting a state change; use the machine clock.
+On resume, capture arrivals before replies/rebasing; append the old-to-new root mapping.
+Record last saved STATE update/time versus newest internal FOUND/round times,
+their order/missing events, and a check of every finding's voice and home.
+Recovery receipt: `STATE N @time | FOUND @time/none | rounds @times/none | order/missing events | voices/homes checked`.
+Record executed tool probes and errors; refusals are setup defects, not job failures.
 Record launch intent before invocation, then the returned handle immediately.
 Record worker results on arrival, including evidence and checks not run.
 Before context loss, state conditions on disk, not unconditional old orders.

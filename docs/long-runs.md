@@ -1,5 +1,12 @@
 # Long runs: work that outlives one context
-EXPERIMENTAL. First-use trials passed by this generic procedure: none yet; a Codex trial follows this build.
+EXPERIMENTAL. First-use trials passed: none. The first Codex trial failed; corrections await re-trial.
+
+Before your very first command, apply the host's literal REMOVE_ENV prefix,
+including to reads of this procedure, STATE.md or PROMPT.md and tool checks.
+Set job-local TMP and TEMP in every command environment, bootstrap included.
+The caller must supply that prefix and temp paths in the initial/takeover/worker
+invocation, before any read. If absent, request them without running a command;
+do not read STATE.md first to discover them. A cleaned launcher is not a waiver.
 
 Use this for a Claude Code, Codex CLI or Gemini CLI session launching workers,
 or resuming their work, when the work will outlive one context window.
@@ -39,6 +46,7 @@ the shape, not commands or permissions supplied by this plugin.
 | REMOVE_ENV | credential names to remove and exact command prefix | `env -u EXAMPLE_TOKEN` in a POSIX shell |
 | AUTH | any credential exception, network and sandbox grants by task | none; offline worker with writes only in its job folder |
 | LAUNCH | installed CLI paths, models, start/resume commands, environment controls | host-checked command per lineage, with output and exit-status files |
+| TOOLS | every declared executable, actual runner, safe probe and expected result | `git --version`; an interpreter's harmless print snippet |
 | ENTRYPOINT | durable pointer by which a new session finds the active run | task description containing the absolute STATE.md path |
 
 Use `none` where a slot truly does not apply, with a reason. If a required
@@ -58,7 +66,7 @@ missing slots as BLOCKED rather than attempting an undocumented launch.
 
 1. Choose `<run>` on persistent storage outside all checkouts. Reject a path
    with a `.git` segment. Ask git about its nearest existing ancestor with
-   `git -C "<ancestor>" rev-parse --is-inside-work-tree`.
+   `<REMOVE_ENV> git -C "<ancestor>" rev-parse --is-inside-work-tree`.
    Proceed only when git positively reports `not a git repository`;
    missing git, permission errors or damaged repositories are not proof.
 2. Create `<run>/briefs/`, `<run>/findings/` and `<run>/jobs/`.
@@ -73,11 +81,12 @@ missing slots as BLOCKED rather than attempting an undocumented launch.
 4. Write tested, pasteable start commands for each available lineage into
    STATE.md and PROGRESS.md, labelled by lineage. Mark unavailable commands
    `not yet tried` or `unavailable`; do not leave a runnable-looking guess.
-   Each command starts in `<run>`, applies REMOVE_ENV, and supplies this prompt:
+   Each command starts in `<run>` and supplies this prompt with literal values:
 
-   > Read `<procedure>` whole, then the RULES files in STATE.md. Your run folder
-   > and working directory are `<run>`. Read STATE.md and PROGRESS.md. Follow
-   > Recovering after a lost context before acting on any existing work.
+   > Before your very first command, use `<REMOVE_ENV>` and set TMP and TEMP to
+   > `<run>/tmp/`, including for bootstrap reads. Read `<procedure>` whole, then
+   > STATE.md and its RULES. Your working directory is `<run>`. Follow Recovering
+   > after a lost context before acting on existing work; capture arrivals before replying.
 
    Record the absolute STATE.md path at ENTRYPOINT, outside the run folder,
    within authorized writes (for example, the host's existing task description).
@@ -96,6 +105,14 @@ missing slots as BLOCKED rather than attempting an undocumented launch.
 6. Keep the orchestrator's working directory at `<run>`. Workers write only
    their assigned job folders or isolated clones. Record Update 1 and the Now
    block before the first work report. No access grant flows from parent to child.
+7. The first session must execute every host-declared TOOLS probe with REMOVE_ENV
+   before the first job step, in its actual runner/sandbox; lookup is insufficient.
+   Test interpreters with harmless snippets, not job calculations. Workers must
+   also probe their declared tools in their own runner before their first job step.
+   Record exact commands, stdout/stderr, exit/refusal and runner in STATE.md.
+   A refusal or mismatch is a SETUP DEFECT, not a job failure: block dependent
+   work, request corrected setup, and verify it before continuing. Never silently
+   substitute a tool or label a substitute check as the required check's success.
 
 ## The run folder and state
 
@@ -116,6 +133,15 @@ row per in-flight job, including coordinators and integration jobs.
 Each row holds kind, handle, lineage/model, folder, brief, expected output,
 start time and coordinator if any. Use actual returned handles, never invented ones.
 A row leaves Now only after its result is recorded in an update.
+
+Current: STATE.md's Host slots, start/resume commands and Now; PROGRESS.md's
+count/counting rule, start/resume commands and Human actions. Rewrite these on
+resume to match observed current paths/state. History: STATE's creation header
+and Updates; PROGRESS's Integrated or handed back and Decisions you can reverse.
+Never rewrite history, including old roots, evidence paths, decisions or handoffs.
+Other event narratives remain history unless explicitly labelled current.
+Append corrections/reversals. For a copied run, record the old-to-new root mapping
+in a new update; translate paths for current access only, never global-replace files.
 
 Append an update, newest last, whenever work launches, returns or stops;
 a branch tip moves (including a fetch); a decision or human ruling arrives;
@@ -138,16 +164,19 @@ taking over. Memory and a compaction summary are pointers, not current state.
 1. Read this procedure whole, then STATE.md's slots, start commands, Now block
    and latest updates; PROGRESS.md; FOUND.md; and the findings for open rounds.
    Follow references into older updates when needed to explain a decision.
+   Use the invocation's current root; retain the last saved update number/time
+   before adding any update.
 2. Verify recorded facts against git and disk, substituting filled paths/refs:
 
    ```sh
-   git -C "<repo>" rev-parse "<base>"
-   git -C "<repo>" worktree list
-   git -C "<worktree>" status --porcelain
-   git -C "<repo>" rev-parse "<branch>"
-   git -C "<repo>" merge-base --is-ancestor <candidate-sha> "<base>"
+   <REMOVE_ENV> git -C "<repo>" rev-parse "<base>"
+   <REMOVE_ENV> git -C "<repo>" worktree list
+   <REMOVE_ENV> git -C "<worktree>" status --porcelain
+   <REMOVE_ENV> git -C "<repo>" rev-parse "<branch>"
+   <REMOVE_ENV> git -C "<repo>" merge-base --is-ancestor <candidate-sha> "<base>"
    ```
 
+   Replace `<REMOVE_ENV>` with the supplied literal prefix in all command examples.
    Run status for every recorded worktree and check every branch tip.
    For ancestry, exit 0 means already integrated; exit 1 means not an ancestor;
    another error means unknown. If INTEGRATE squashes or rebases, use its
@@ -162,13 +191,20 @@ taking over. Memory and a compaction summary are pointers, not current state.
    recorded process/handle with the host's liveness check; absence of output
    does not prove death. An inaccessible handle is unknown, not permission
    to run a second copy. Reconcile or stop the original before replacement.
-4. Compare timestamps written *inside* FOUND.md and round files with the latest
-   state updates, never file modification times. A quiet file may be correct;
-   check whether events in the updates should have added entries to it.
-5. Record any completed but unrecorded result immediately. Write
+4. Record an explicit comparison: last saved STATE update number/time on entry,
+   newest timestamp inside FOUND.md and each round file (or none), their order
+   and whether intervening events require missing entries. Use internal dates,
+   never mtime; worker receipt versus stop time is not this comparison. Check
+   every finding has clock, witness, voice (RAN/READ/decided/predicted) and home;
+   append evidence-based corrections for omissions, never invent a prior RAN.
+5. Capture any arrived, unrecorded result as the first recovery writes to the
+   round file and STATE update, before path rebasing, other mutations or any
+   recovery/work reply. Reading evidence first is allowed. Capture objections
+   and failed checks too; process exit zero alone is not task success. Write
    `Update N - context lost; state re-read from disk` before the first work
    reply. List checks, disagreements and unknowns; rewrite Now to match
-   observed git and job facts. Preserve prior updates rather than erasing them.
+   observed facts; update only current sections using the recorded root mapping.
+   After capture, recheck TOOLS probes if the runner/setup changed, before job work.
    Do not repeat a build, review or integration whose result already exists.
 
 ### With Jev installed
@@ -206,7 +242,11 @@ for the missing fact. Do not fill it from a summary or relaunch on a guess.
    authorization and stop rules. Set TMP and TEMP inside the job's `tmp/`.
    Keep a relative stop rule relative, with the measurements it compares.
    A predicted budget is not a hard ceiling unless the brief explicitly says so.
-4. Launch with "Read `<run>/jobs/<job>/PROMPT.md` whole and follow it."
+   Resolve inherited-instruction/scope conflicts before launch; extra instruction
+   reads do not expand a narrow job's input scope. Report unresolved conflicts.
+4. Launch with the literal REMOVE_ENV prefix and job TMP/TEMP paths as the first
+   instruction, applying to the first command reading PROMPT.md; then "Read
+   `<run>/jobs/<job>/PROMPT.md` whole and follow it." Verify worker TOOLS first.
    The host launcher may append sandbox restrictions. Save the command,
    returned handle, model, start time, output paths and expected terminal
    marker in Now immediately. Record launch intent before invoking it so a
@@ -269,7 +309,7 @@ Check a subagent's actual model in its transcript's assistant `model` fields;
 the orchestrator model in metadata was not evidence of the worker's model.
 Model aliases and their suitability belong in LAUNCH, not in this procedure.
 
-The source starter used `claude "<start-prompt>" --add-dir "<repo>"` from the
+The source starter used `<REMOVE_ENV> claude "<start-prompt>" --add-dir "<repo>"` from the
 run folder with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` to load added
 instructions. Project settings did not load from that added directory, while
 session settings could restore environment values. Do not assume added-directory
@@ -278,7 +318,7 @@ not yet tried here. This generic procedure's first-use trial: not yet tried.
 
 ## Codex CLI (GPT lineage)
 
-The source starter used `codex --cd "<run>" --sandbox workspace-write "<start-prompt>"`.
+The source starter used `<REMOVE_ENV> codex --cd "<run>" --sandbox workspace-write "<start-prompt>"`.
 Its Windows sandbox was reported to block worker network access. That is an
 environment observation, not a universal Codex rule or a reason to escalate.
 It also offered `--sandbox danger-full-access` under a separate human grant;
@@ -293,9 +333,9 @@ follow-ups and avoided ephemeral sessions. Its sandbox refused writes outside
 the job folder and could not stop processes it started; those actions were
 deferred to TO_RUN_OUTSIDE.md. It used a checked full interpreter path after
 command lookup failed. Usage-limit messages ended the attempt, not a wait.
-The source still listed real-Codex wrapper use as unproven. Direct headless
-CLI syntax, other sandbox behavior and this generic procedure's
-first-use trial: not yet tried. Do not copy the source environment's limits as facts.
+The source still lists real-Codex wrapper use as unproven. Other sandbox behavior
+and direct headless syntax: not yet tried here. This procedure's first Codex trial
+failed; corrections await re-trial. Do not generalize source environment limits.
 
 ## Gemini CLI
 
@@ -319,11 +359,11 @@ the reader launcher establishes orchestration support.
 ## Using this from Codex CLI or Gemini CLI
 
 Install or copy this document and its adjacent templates locally; Jev is optional.
-Resolve `<procedure>` to its absolute path. Add this exact line to AGENTS.md
-(Codex CLI) or GEMINI.md (Gemini CLI), replacing that one placeholder:
+Resolve paths. Add this line to AGENTS.md (Codex) or GEMINI.md (Gemini), replacing
+the placeholders; the invocation must provide the literal prefix and temp paths:
 
 ```text
-For sessions launching workers, or resuming their work, that will outlive one context window, read <procedure> whole before acting and follow its disk-state and recovery procedure.
+For sessions launching workers, or resuming them, whose work outlives context: before the very first command (including bootstrap reads), use <REMOVE_ENV> and set TMP/TEMP to the invocation's supplied job-local paths; if missing, ask without a command. Read <procedure> whole and follow it.
 ```
 
 Fill LAUNCH from the installed host's instructions without guessing new flags.
@@ -337,6 +377,9 @@ dated from the machine clock. Count separate deliverable types separately.
 If scope changes, show the old and new denominator and why. Human actions
 point to their durable home by id and title; do not copy a second question.
 Keep exact integration success lines and reversible decisions with evidence.
+Each finding must name its voice: RAN = executed; READ = inspected saved evidence
+(attribute unchecked reader claims); decided = chosen; predicted = expected.
+Reading a worker's RAN result is your READ, not your own execution.
 
 Before ending, give every FOUND.md item a durable home from FINDING_HOMES or
 `none` with a reason. A draft is owed until its filing is confirmed; record

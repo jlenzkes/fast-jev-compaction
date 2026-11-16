@@ -1,3 +1,6 @@
+Before the very first command, including this brief's bootstrap read: apply
+{{EXACT_REMOVE_ENV_PREFIX}} and set TMP/TEMP to {{JOB_FOLDER}}/tmp.
+If these were not supplied before reading, report the omission; do not repeat it.
 Review {{ARTIFACT}} at {{TIP}}, base {{BASE_SHA}}.
 Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. Question: {{SPECIFIC_QUESTION}}.
 Shared brief, if any: {{PATH_OR_NONE}}. Read each assigned file whole.
@@ -9,6 +12,10 @@ Disclose inherited conversation, instructions and memory before claiming a
 cold read. Read no outside artifact for a cold reaction: {{ISOLATION_BOUNDARY}}.
 
 {{PASTE_FILLED_CREDENTIALS_NOTE}}
+TOOLS: {{DECLARED_TOOLS_SAFE_PROBES_EXPECTED_RESULTS}}. Execute probes here before
+job work; save exact commands/output/errors/exits. Refusal is a SETUP DEFECT.
+If inherited instructions require extra inputs, report the scope conflict first;
+do not widen a narrow assignment's inputs or silently perform outside work.
 
 BACKGROUND: {{PLAIN_WORDS_AND_DELIBERATE_CHANGE}}.
 PROMISE: {{CONTRACT}}. History is a claim to verify: {{PRIOR_CLAIMS_OR_NONE}}.

@@ -1,6 +1,11 @@
 # Progress: {{GOAL}}
 **PROGRESS:** {{N_OF_M_PER_DELIVERABLE_TYPE}}; counted {{CLOCK_DATE_TIME_ZONE}}; rule: {{WHAT_COUNTS_AS_DONE}}.
 
+Before the very first command, including reads: use the invocation's literal
+REMOVE_ENV prefix and job-local TMP/TEMP. If missing, ask without a command.
+CURRENT: count/rule, start/resume and Human actions; rewrite on resume.
+HISTORY: Integrated or handed back and Decisions; append only, never rewrite
+old roots, evidence paths, original preparation or handoffs. Append corrections.
 If scope changes, state old/new denominators and why. Count outcomes, not effort.
 
 ## Start or resume the orchestrator
