@@ -1,7 +1,7 @@
 # Review round {{N}} on {{ARTIFACT}} at {{SHA}}
 
-Before the very first command, including reads: use the invocation's literal
-REMOVE_ENV prefix and job-local TMP/TEMP. If missing, ask without a command.
+First list credential-shaped env names only (sole unprefixed exception), then use
+supplied values or derive env -u per name and absolute run/tmp; create it prefixed. Never stop for absent literals.
 Shared brief: {{PATH}}. Record each reader immediately on arrival, before
 replying or other work. Times are machine-clock dates/times with timezone.
 Keep full reports and pointers even after the fix batch is integrated.

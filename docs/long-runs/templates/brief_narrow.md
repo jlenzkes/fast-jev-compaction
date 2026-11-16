@@ -1,9 +1,11 @@
-Before the very first command, including this brief's bootstrap read: apply
-{{EXACT_REMOVE_ENV_PREFIX}} and set TMP/TEMP to {{JOB_FOLDER}}/tmp.
-If these were not supplied before reading, report the omission; do not repeat it.
+First command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
+Writer: fill actual literals used preparing this job; send no placeholders:
+REMOVE_ENV: {{EXACT_REMOVE_ENV_PREFIX}}; TMP: {{ABSOLUTE_TMP}}; TEMP: {{ABSOLUTE_TEMP}}.
+Use supplied values or derive env -u per name and absolute current job/tmp; create it prefixed.
+Never stop for absent literals. If copied, map {{JOB_FOLDER}} to the current brief folder for TMP/TEMP.
 ONE NARROW READING QUESTION: {{QUESTION}}.
 Read only {{TWO_INPUT_FILES}} in {{JOB_FOLDER}}. Write VERDICT.md there.
-Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. TMP and TEMP: {{JOB_FOLDER}}/tmp.
+Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. TMP/TEMP: literals above, else absolute current job/tmp.
 Allowed commands, bounds and sandbox: {{COMMANDS_BOUNDS_AND_AUTH_OR_READ_ONLY}}.
 
 {{PASTE_FILLED_CREDENTIALS_NOTE}}

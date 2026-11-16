@@ -1,13 +1,15 @@
-Before the very first command, including this brief's bootstrap read: apply
-{{EXACT_REMOVE_ENV_PREFIX}} and set TMP/TEMP to {{JOB_FOLDER}}/tmp.
-If these were not supplied before reading, report the omission; do not repeat it.
+First command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
+Writer: fill actual literals used preparing this job; send no placeholders:
+REMOVE_ENV: {{EXACT_REMOVE_ENV_PREFIX}}; TMP: {{ABSOLUTE_TMP}}; TEMP: {{ABSOLUTE_TEMP}}.
+Use supplied values or derive env -u per name and absolute current job/tmp; create it prefixed.
+Never stop for absent literals. If copied, map {{JOB_FOLDER}} to the current brief folder for TMP/TEMP.
 You are a BUILDER with one closed job: {{JOB}}. Build only the named commits.
 
 STANDING RULE: no unnamed helper, option, abstraction, parameter, file, rename
 or refactor. If needed, stop that dependent commit and report the missing scope.
 
 WHERE: work only in {{JOB_FOLDER}}. Its repo/ is an isolated clone on
-{{BRANCH}} at {{TIP}}, base {{BASE_SHA}}. TMP and TEMP: {{JOB_FOLDER}}/tmp.
+{{BRANCH}} at {{TIP}}, base {{BASE_SHA}}. TMP/TEMP: literals above, else absolute current job/tmp.
 You are not alone: respect other workers' ownership; never revert their edits.
 Do not push or edit a live checkout. Network/sandbox: {{AUTH}}.
 Allowed writes: {{PATHS}}. Processes/waits: {{BOUNDS_AND_CLEANUP_OR_NO_PROCESSES}}.

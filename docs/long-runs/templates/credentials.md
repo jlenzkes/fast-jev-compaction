@@ -1,8 +1,12 @@
-Before the very first command, including bootstrap reads of any brief or state,
-apply {{EXACT_PREFIX_OR_NONE_WITH_REASON}} and set TMP/TEMP to {{JOB_LOCAL_TMP}}.
-The launcher/invocation must supply these literal values before any read;
-if missing, ask without a command. This applies to every command, not just task work.
-- Apply this host-supplied removal prefix: {{EXACT_PREFIX_OR_NONE_WITH_REASON}}.
+First command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
+Bash: `python3 -I -c 'import os,re; print("\n".join(sorted(n for n in os.environ if re.search("KEY|TOKEN|SECRET|PASSWORD",n,re.I))))'`.
+PowerShell: `Get-ChildItem Env: | Where-Object Name -Match 'KEY|TOKEN|SECRET|PASSWORD' | ForEach-Object Name`.
+Writer: fill literal values actually used preparing the job; send no placeholders:
+REMOVE_ENV: {{EXACT_REMOVE_ENV_PREFIX}}; TMP: {{ABSOLUTE_TMP}}; TEMP: {{ABSOLUTE_TEMP}}.
+Explicit current task/brief values win, not inherited OS defaults. Derive missing prefix as env -u per listed name
+(prefix commands with env if none; never run env alone), and TMP/TEMP as absolute current job/tmp; create it prefixed
+before other reads/probes/work. Missing literals never require a stop or question.
+- Apply the effective supplied/derived prefix to every command after the listing.
   Known names: {{NAMES_ONLY}}. Never set a credential unless AUTH explicitly
   grants that exception for this task: {{AUTH_OR_NONE}}.
 - A launcher stripping names does not prove settings or a rebuilt environment

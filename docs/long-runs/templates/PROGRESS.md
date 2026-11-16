@@ -1,8 +1,8 @@
 # Progress: {{GOAL}}
 **PROGRESS:** {{N_OF_M_PER_DELIVERABLE_TYPE}}; counted {{CLOCK_DATE_TIME_ZONE}}; rule: {{WHAT_COUNTS_AS_DONE}}.
 
-Before the very first command, including reads: use the invocation's literal
-REMOVE_ENV prefix and job-local TMP/TEMP. If missing, ask without a command.
+First list credential-shaped env names only (sole unprefixed exception), then use
+supplied values or derive env -u per name and absolute run/tmp; create it prefixed. Never stop for absent literals.
 CURRENT: count/rule, start/resume and Human actions; rewrite on resume.
 HISTORY: Integrated or handed back and Decisions; append only, never rewrite
 old roots, evidence paths, original preparation or handoffs. Append corrections.

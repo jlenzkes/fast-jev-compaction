@@ -1,7 +1,7 @@
 # Found on the way
 
-Before the very first command, including reads: use the invocation's literal
-REMOVE_ENV prefix and job-local TMP/TEMP. If missing, ask without a command.
+First list credential-shaped env names only (sole unprefixed exception), then use
+supplied values or derive env -u per name and absolute run/tmp; create it prefixed. Never stop for absent literals.
 Add an entry when discovered. Use timestamps inside this file, never mtime.
 Keep the entry after filing; a draft is owed until its home is confirmed.
 Every entry requires clock, witness, voice and disposition/home; none may be omitted.

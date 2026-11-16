@@ -1,18 +1,26 @@
 # Long runs: work that outlives one context
-EXPERIMENTAL. First-use trials passed: none. The first Codex trial failed; corrections await re-trial.
+EXPERIMENTAL. First-use trials passed: none. Two Codex trials failed; corrections await re-trial.
 
-Before your very first command, apply the host's literal REMOVE_ENV prefix,
-including to reads of this procedure, STATE.md or PROMPT.md and tool checks.
-Set job-local TMP and TEMP in every command environment, bootstrap included.
-The caller must supply that prefix and temp paths in the initial/takeover/worker
-invocation, before any read. If absent, request them without running a command;
-do not read STATE.md first to discover them. A cleaned launcher is not a waiver.
+Bootstrap on first use and every resume; never stop because literals are absent:
+1. The first command lists credential-shaped environment NAMES ONLY, never values.
+   Only this listing may run unprefixed and before TMP/TEMP are set; use a supplied
+   prefix if available. No other unprefixed command, including reads or tool lookups.
+   Bash: `python3 -I -c 'import os,re; print("\n".join(sorted(n for n in os.environ if re.search("KEY|TOKEN|SECRET|PASSWORD",n,re.I))))'`.
+   PowerShell: `Get-ChildItem Env: | Where-Object Name -Match 'KEY|TOKEN|SECRET|PASSWORD' | ForEach-Object Name`.
+   An empty list is valid. Never dump environment values or open credential files.
+2. Use the supplied REMOVE_ENV prefix if present; otherwise construct `env -u 'NAME'`
+   for every listed name, quoting each exact name; if none match, prefix commands with `env`, never run it alone.
+3. With that prefix, resolve the invocation's run path against the starting working
+   directory (a worker uses its brief's folder), create its own absolute `tmp/`,
+   then set TMP and TEMP to that directory before reads, probes or job work.
+   Explicit current task/brief values win (not inherited OS defaults); derive missing
+   values and create directories first. New runs do the prefixed outside-checkout
+   check below before creating directories. All later commands carry REMOVE_ENV.
+Record effective literals/origin in the first state/recovery update; a one-line prompt needs only the run path.
 
-Use this for a Claude Code, Codex CLI or Gemini CLI session launching workers,
-or resuming their work, when the work will outlive one context window.
-A worker may be a subagent, a headless builder or an outside reader.
-Read this file whole before starting and after every loss of context.
-Nothing needed to resume may live only in the conversation.
+For Claude Code, Codex CLI or Gemini CLI sessions launching/resuming workers across context windows.
+Workers are subagents, headless builders or readers. Read whole before starting
+and after context loss. Nothing needed to resume lives only in the conversation.
 
 ## Three rules to keep before reading further
 
@@ -33,8 +41,7 @@ checkout; `<procedure>` is the absolute path to this file in the plugin install
 or a local copy. `<base>` is the host's integration branch, not a fixed name.
 Resolve paths to absolute paths and quote them in runnable commands.
 
-Before work starts, fill these named slots in STATE.md. Examples illustrate
-the shape, not commands or permissions supplied by this plugin.
+Before work, fill STATE.md's slots. Examples give shapes, not plugin-supplied commands or permissions.
 
 | Slot | What the host supplies | Example |
 | --- | --- | --- |
@@ -43,24 +50,20 @@ the shape, not commands or permissions supplied by this plugin.
 | CHECKS | exact commands, expected outcomes, resource limits | `npm test`, exit zero; one suite at a time |
 | INTEGRATE | authorized integrator, exact local command, success witness | maintainer merges a reviewed branch; record resulting commit |
 | FINDING_HOMES | durable destinations for defects, tasks, ideas, human actions | issue tracker, backlog file, decision log |
-| REMOVE_ENV | credential names to remove and exact command prefix | `env -u EXAMPLE_TOKEN` in a POSIX shell |
+| REMOVE_ENV | supplied prefix or bootstrap-derived names and prefix | `env -u EXAMPLE_TOKEN` in a POSIX shell |
 | AUTH | any credential exception, network and sandbox grants by task | none; offline worker with writes only in its job folder |
 | LAUNCH | installed CLI paths, models, start/resume commands, environment controls | host-checked command per lineage, with output and exit-status files |
 | TOOLS | every declared executable, actual runner, safe probe and expected result | `git --version`; an interpreter's harmless print snippet |
 | ENTRYPOINT | durable pointer by which a new session finds the active run | task description containing the absolute STATE.md path |
 
-Use `none` where a slot truly does not apply, with a reason. If a required
-slot is missing, record BLOCKED and the missing fact; do independent work only.
-Do not invent a review policy, a credential list, a launcher or access grant.
+Use `none` where a slot truly does not apply, with a reason. Derive missing
+bootstrap values above; other missing required slots block dependent work only.
+Do not invent a review policy, a launcher or access grant.
 This procedure supplies no launch, cleanup or integration scripts.
 
-Prerequisite: the host maintainer supplies these slots once, in existing host
-instructions or a run setup brief. The orchestrator can derive paths, refs,
-checks and CLI syntax from those instructions and installed help; credential
-names and approval authority need a host declaration, not inference. Before
-launching a worker, confirm that each slot is filled and all needed commands
-are available under AUTH. A first-time reader without that setup records the
-missing slots as BLOCKED rather than attempting an undocumented launch.
+The host supplies task policies; bootstrap values also have defaults above.
+Derive other nonsecret facts from instructions/help; confirm slots and command
+availability under AUTH before launch. Bootstrap supplies no permissions or launch syntax.
 
 ## Create the run once
 
@@ -81,12 +84,11 @@ missing slots as BLOCKED rather than attempting an undocumented launch.
 4. Write tested, pasteable start commands for each available lineage into
    STATE.md and PROGRESS.md, labelled by lineage. Mark unavailable commands
    `not yet tried` or `unavailable`; do not leave a runnable-looking guess.
-   Each command starts in `<run>` and supplies this prompt with literal values:
+   Each command starts in `<run>`; include known literals, but allow this prompt:
 
-   > Before your very first command, use `<REMOVE_ENV>` and set TMP and TEMP to
-   > `<run>/tmp/`, including for bootstrap reads. Read `<procedure>` whole, then
-   > STATE.md and its RULES. Your working directory is `<run>`. Follow Recovering
-   > after a lost context before acting on existing work; capture arrivals before replying.
+   > First list credential-shaped environment names only (sole unprefixed exception).
+   > Derive missing prefix and absolute `<run>/tmp/` per Bootstrap; create temp dirs prefixed.
+   > Read `<procedure>` whole, then STATE.md/RULES. Recover `<run>`; capture arrivals before replying.
 
    Record the absolute STATE.md path at ENTRYPOINT, outside the run folder,
    within authorized writes (for example, the host's existing task description).
@@ -94,14 +96,12 @@ missing slots as BLOCKED rather than attempting an undocumented launch.
    pointer can be written, deliver the absolute path in the handoff and record
    that limitation; a session given neither pointer nor run path cannot resume.
 
-5. Apply REMOVE_ENV before launch. In the started session, use a host-supplied
-   names-only check for credential-shaped names (KEY, TOKEN, SECRET, PASSWORD,
-   case insensitive), plus the host's known names. Never dump the environment
-   or open credential-bearing files. Settings or a rebuilt child environment
-   can restore stripped names. Record names only and the removal prefix in
-   STATE.md; paste [credentials.md](long-runs/templates/credentials.md) into
-   each brief with its placeholders filled. Unexpected names block affected
-   commands until removed or covered by AUTH. Do not claim a pattern finds all secrets.
+5. Apply REMOVE_ENV before launch; repeat the names-only check in the started
+   session using Bootstrap or the host's check. Settings/rebuilt environments may
+   restore names; remove unexpected names before affected commands or use AUTH.
+   Record names/prefix in STATE.md; paste filled
+   [credentials.md](long-runs/templates/credentials.md) into each brief.
+   A name pattern cannot find every secret; never print values or credential files.
 6. Keep the orchestrator's working directory at `<run>`. Workers write only
    their assigned job folders or isolated clones. Record Update 1 and the Now
    block before the first work report. No access grant flows from parent to child.
@@ -161,7 +161,9 @@ Record process ids and the host's liveness check when processes are involved.
 Do this after built-in compaction, Jev compaction, a restart or a new lineage
 taking over. Memory and a compaction summary are pointers, not current state.
 
-1. Read this procedure whole, then STATE.md's slots, start commands, Now block
+1. Bootstrap also applies on resume: re-derive missing values, never stop for them.
+   Re-derivation and prefixed temp creation are recovery setup, before task writes.
+   Read this procedure whole, then STATE.md's slots, start commands, Now block
    and latest updates; PROGRESS.md; FOUND.md; and the findings for open rounds.
    Follow references into older updates when needed to explain a decision.
    Use the invocation's current root; retain the last saved update number/time
@@ -176,7 +178,7 @@ taking over. Memory and a compaction summary are pointers, not current state.
    <REMOVE_ENV> git -C "<repo>" merge-base --is-ancestor <candidate-sha> "<base>"
    ```
 
-   Replace `<REMOVE_ENV>` with the supplied literal prefix in all command examples.
+   Replace `<REMOVE_ENV>` with the effective supplied/derived prefix in all examples.
    Run status for every recorded worktree and check every branch tip.
    For ancestry, exit 0 means already integrated; exit 1 means not an ancestor;
    another error means unknown. If INTEGRATE squashes or rebases, use its
@@ -235,18 +237,21 @@ for the missing fact. Do not fill it from a summary or relaunch on a guess.
 2. Write PROMPT.md from [brief_builder.md](long-runs/templates/brief_builder.md),
    [brief_reader.md](long-runs/templates/brief_reader.md) or
    [brief_narrow.md](long-runs/templates/brief_narrow.md).
-   Replace every placeholder and paste the filled credentials note.
+   Fill every placeholder and check none remain: write literal prefix, TMP and TEMP
+   actually used to prepare this job, not just a reference or a host requirement.
+   Paste the filled credentials note; a worker needs no host-supplied literals.
    A shared brief lives in `<run>/briefs/`; each worker's PROMPT.md names it
    and adds that worker's role, lineage, model and specific question.
 3. Name ownership, allowed writes, inputs, exact outputs, checks, resource
-   authorization and stop rules. Set TMP and TEMP inside the job's `tmp/`.
+   authorization and stop rules. Create/use the job's `tmp/` as TMP/TEMP while
+   preparing it, and put those exact absolute values in its brief. On transport,
+   map the recorded job root to the current brief folder; preserve original text.
    Keep a relative stop rule relative, with the measurements it compares.
    A predicted budget is not a hard ceiling unless the brief explicitly says so.
    Resolve inherited-instruction/scope conflicts before launch; extra instruction
    reads do not expand a narrow job's input scope. Report unresolved conflicts.
-4. Launch with the literal REMOVE_ENV prefix and job TMP/TEMP paths as the first
-   instruction, applying to the first command reading PROMPT.md; then "Read
-   `<run>/jobs/<job>/PROMPT.md` whole and follow it." Verify worker TOOLS first.
+4. Launch with "Bootstrap, then read `<run>/jobs/<job>/PROMPT.md` whole and follow
+   it." Include known literals as a convenience, never a prerequisite. Probe TOOLS.
    The host launcher may append sandbox restrictions. Save the command,
    returned handle, model, start time, output paths and expected terminal
    marker in Now immediately. Record launch intent before invoking it so a
@@ -360,10 +365,10 @@ the reader launcher establishes orchestration support.
 
 Install or copy this document and its adjacent templates locally; Jev is optional.
 Resolve paths. Add this line to AGENTS.md (Codex) or GEMINI.md (Gemini), replacing
-the placeholders; the invocation must provide the literal prefix and temp paths:
+the placeholders; missing bootstrap literals are derived, never requested:
 
 ```text
-For sessions launching workers, or resuming them, whose work outlives context: before the very first command (including bootstrap reads), use <REMOVE_ENV> and set TMP/TEMP to the invocation's supplied job-local paths; if missing, ask without a command. Read <procedure> whole and follow it.
+For worker sessions outliving context or resuming them: first list credential-shaped environment names only (the sole unprefixed exception); derive any missing env -u prefix and absolute run/tmp as Bootstrap in <procedure> directs, create temp directories prefixed, then read/follow it. Supplied current values win; absence never requires asking.
 ```
 
 Fill LAUNCH from the installed host's instructions without guessing new flags.

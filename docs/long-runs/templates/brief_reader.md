@@ -1,13 +1,15 @@
-Before the very first command, including this brief's bootstrap read: apply
-{{EXACT_REMOVE_ENV_PREFIX}} and set TMP/TEMP to {{JOB_FOLDER}}/tmp.
-If these were not supplied before reading, report the omission; do not repeat it.
+First command lists credential-shaped env NAMES ONLY; it alone may run unprefixed.
+Writer: fill actual literals used preparing this job; send no placeholders:
+REMOVE_ENV: {{EXACT_REMOVE_ENV_PREFIX}}; TMP: {{ABSOLUTE_TMP}}; TEMP: {{ABSOLUTE_TEMP}}.
+Use supplied values or derive env -u per name and absolute current job/tmp; create it prefixed.
+Never stop for absent literals. If copied, map {{JOB_FOLDER}} to the current brief folder for TMP/TEMP.
 Review {{ARTIFACT}} at {{TIP}}, base {{BASE_SHA}}.
 Role/lineage/model: {{ROLE_LINEAGE_MODEL}}. Question: {{SPECIFIC_QUESTION}}.
 Shared brief, if any: {{PATH_OR_NONE}}. Read each assigned file whole.
 
 WHERE: {{JOB_FOLDER}}. Inputs already copied here: {{INPUTS}}.
 Write only {{REPORT_PATH_AND_ALLOWED_SCRATCH}}; no checkout edits or commits.
-TMP and TEMP: {{JOB_FOLDER}}/tmp. Respect other workers' ownership.
+TMP/TEMP: literals above, else absolute current job/tmp. Respect other workers' ownership.
 Disclose inherited conversation, instructions and memory before claiming a
 cold read. Read no outside artifact for a cold reaction: {{ISOLATION_BOUNDARY}}.
 
