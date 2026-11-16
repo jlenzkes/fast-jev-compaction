@@ -165,6 +165,28 @@ describe('lists that break the rule whatever is joined', () => {
     expect(h.toasts.at(-1)).toMatch(/without their result in the next message: first;/);
   });
 
+  it('names a call answered twice in one message, or a result given twice', () => {
+    const twice = bare(message('user', '', { toolResults: [{ tool_use_id: 'a', text: 'r', isError: false }, { tool_use_id: 'a', text: 'r', isError: false }] }));
+    expect(hook.unpairedTools([bare(use('a')), twice])).toEqual(['a']);
+    // Two result messages for one call join into one with both: the check, not the join, refuses it.
+    const joinedTwice = hook.joinToolRounds([bare(use('a')), bare(result('a', 'r')), bare(result('a', 'r'))]);
+    expect(joinedTwice).toHaveLength(2);
+    expect(hook.unpairedTools(joinedTwice)).toEqual(['a']);
+  });
+
+  it('names a call made twice under one id', () => {
+    const one = message('assistant', '', { toolUses: [{ tool_use_id: 'a', tool: 'Read', input: {}, text: 'r' }, { tool_use_id: 'a', tool: 'Read', input: {}, text: 'r' }] });
+    expect(hook.unpairedTools([bare(one), bare(result('a', 'r'))])).toEqual(['a']);
+  });
+
+  it('falls back rather than hand back two results for one call', async () => {
+    const h = harness({ minReductionRatio: 0.25 });
+    h.jev((key) => (key.endsWith('_t1') ? 0.1 : 0.9));
+    await h.compact([...opening(), use('a'), result('a', RESULT), result('a', RESULT), message('user', 'End.')]);
+    expect(h.fallbacks).toHaveLength(1);
+    expect(h.toasts.at(-1)).toMatch(/without their result in the next message: a;/);
+  });
+
   it('names a turn split by a message with a handle, which is never joined', () => {
     const split = hook.joinToolRounds([bare(use('a')), use('b'), bare(use('c')), bare(result('a', RESULT)), bare(result('b', RESULT)), bare(result('c', RESULT))]);
     expect(hook.unpairedTools?.(split)).toEqual(['a', 'b']);

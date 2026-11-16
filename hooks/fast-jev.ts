@@ -275,11 +275,18 @@ function joined(a: SessionMessage, b: SessionMessage): SessionMessage {
 
 /**
  * The tool ids a list breaks the API's rule on: a call its very next message
- * does not answer, and a result that answers no call of the message right
- * before it. The hook hands back no list with one.
+ * does not answer, a result that answers no call of the message right before
+ * it, and an id called or answered more than once, so a pairing that holds is
+ * one call to one result. The hook hands back no list with one; two results
+ * for one call that the join put in one message are refused here, not merged.
  */
 export function unpairedTools(messages: readonly SessionMessage[]): string[] {
   const breaches = new Set<string>();
+  const seen = new Set<string>();
+  for (const key of messages.flatMap((m) => [...m.toolUses.map((t) => `u${t.tool_use_id}`), ...(m.toolResults ?? []).map((r) => `r${r.tool_use_id}`)])) {
+    if (seen.has(key)) breaches.add(key.slice(1));
+    seen.add(key);
+  }
   messages.forEach((m, i) => {
     const next = messages[i + 1];
     const answered = new Set(next?.role === 'user' ? (next.toolResults ?? []).map((r) => r.tool_use_id) : []);
