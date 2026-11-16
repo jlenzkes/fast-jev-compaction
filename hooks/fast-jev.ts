@@ -215,6 +215,47 @@ export function toSessionMessages(
   });
 }
 
+/**
+ * One turn's calls in one assistant message, and their results in the one
+ * message after it, as the API requires. The host lists a message per
+ * transcript record and writes a record per tool_use block, so a turn of
+ * parallel calls arrives as consecutive assistant messages, then consecutive
+ * result messages. Handed back without a handle, each is built as a message of
+ * its own, and before every request the host answers each call the very next
+ * message does not answer with "[Tool result missing due to internal error]":
+ * a call that succeeded reads as one that failed. So an assistant message joins
+ * the one before it when that one made calls, and a message of results joins
+ * the one before it when that one holds results too; text is joined with a
+ * blank line. A message with a handle is never joined.
+ */
+export function joinToolRounds(messages: readonly SessionMessage[]): SessionMessage[] {
+  const out: SessionMessage[] = [];
+  for (const m of messages) {
+    const last = out.at(-1);
+    const joins =
+      last !== undefined &&
+      last.handle === undefined &&
+      m.handle === undefined &&
+      last.role === m.role &&
+      (m.role === 'assistant'
+        ? last.toolUses.length > 0
+        : (last.toolResults?.length ?? 0) > 0 && (m.toolResults?.length ?? 0) > 0);
+    if (!joins) {
+      out.push(m);
+      continue;
+    }
+    const joined: SessionMessage = {
+      role: m.role,
+      text: [last.text, m.text].filter((t) => t.length > 0).join('\n\n'),
+      toolUses: [...last.toolUses, ...m.toolUses],
+    };
+    const results = [...(last.toolResults ?? []), ...(m.toolResults ?? [])];
+    if (results.length > 0) joined.toolResults = results;
+    out[out.length - 1] = joined;
+  }
+  return out;
+}
+
 export type SessionCompaction = {
   result: CompactResult;
   messages: SessionMessage[];
@@ -616,8 +657,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
           }
         }
       }
-      let out = insertPutBacks(messages, sources, report.placed);
-      const putBackChars = chars(out) - chars(messages);
+      const placedOut = insertPutBacks(messages, sources, report.placed);
+      const putBackChars = chars(placedOut) - chars(messages);
+      let out = joinToolRounds(placedOut);
       // A subagent's compaction gets no note: the transcript it would name is the main session's.
       // A subagent's compaction gets no note: the transcript it would name is the
       // main session's. Nor does one with nothing to say about what sat beside a
