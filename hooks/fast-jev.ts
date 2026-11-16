@@ -221,39 +221,74 @@ export function toSessionMessages(
  * transcript record and writes a record per tool_use block, so a turn of
  * parallel calls arrives as consecutive assistant messages, then consecutive
  * result messages. Handed back without a handle, each is built as a message of
- * its own, and before every request the host answers each call the very next
- * message does not answer with "[Tool result missing due to internal error]":
- * a call that succeeded reads as one that failed. So an assistant message joins
- * the one before it when that one made calls, and a message of results joins
- * the one before it when that one holds results too; text is joined with a
- * blank line. A message with a handle is never joined.
+ * its own; the host joins consecutive user messages but not these, and before
+ * every request it answers each call the very next message does not answer
+ * with "[Tool result missing due to internal error]": a call that succeeded
+ * reads as one that failed.
+ *
+ * So an assistant message joins the one before it when that one made calls.
+ * Then each message with calls takes the user messages after it, up to the
+ * last that holds one of its results: their results become one message (text
+ * a result message carried stays in it, joined with a blank line), and a
+ * message among them with text and no result - what is left of a result
+ * message whose results were deleted - goes right after it, unchanged. A
+ * message with a handle is never joined or moved, and a span holding one is
+ * left as it is: `unpairedTools` then refuses the list.
  */
 export function joinToolRounds(messages: readonly SessionMessage[]): SessionMessage[] {
-  const out: SessionMessage[] = [];
+  const rounds: SessionMessage[] = [];
   for (const m of messages) {
-    const last = out.at(-1);
-    const joins =
-      last !== undefined &&
-      last.handle === undefined &&
-      m.handle === undefined &&
-      last.role === m.role &&
-      (m.role === 'assistant'
-        ? last.toolUses.length > 0
-        : (last.toolResults?.length ?? 0) > 0 && (m.toolResults?.length ?? 0) > 0);
-    if (!joins) {
-      out.push(m);
-      continue;
+    const last = rounds.at(-1);
+    if (last?.role === 'assistant' && m.role === 'assistant' && last.toolUses.length > 0 && last.handle === undefined && m.handle === undefined) {
+      rounds[rounds.length - 1] = joined(last, m);
+    } else rounds.push(m);
+  }
+  const out: SessionMessage[] = [];
+  for (let i = 0; i < rounds.length; i++) {
+    const m = rounds[i]!;
+    out.push(m);
+    if (m.role !== 'assistant' || m.toolUses.length === 0) continue;
+    const ids = new Set(m.toolUses.map((t) => t.tool_use_id));
+    let end = i;
+    for (let j = i + 1; j < rounds.length && rounds[j]!.role === 'user'; j++) {
+      if ((rounds[j]!.toolResults ?? []).some((r) => ids.has(r.tool_use_id))) end = j;
     }
-    const joined: SessionMessage = {
-      role: m.role,
-      text: [last.text, m.text].filter((t) => t.length > 0).join('\n\n'),
-      toolUses: [...last.toolUses, ...m.toolUses],
-    };
-    const results = [...(last.toolResults ?? []), ...(m.toolResults ?? [])];
-    if (results.length > 0) joined.toolResults = results;
-    out[out.length - 1] = joined;
+    const span = rounds.slice(i + 1, end + 1);
+    if (span.length < 2 || span.some((s) => s.handle !== undefined)) continue;
+    const holdsResults = (s: SessionMessage) => (s.toolResults?.length ?? 0) > 0;
+    out.push(span.filter(holdsResults).reduce(joined), ...span.filter((s) => !holdsResults(s)));
+    i = end;
   }
   return out;
+}
+
+function joined(a: SessionMessage, b: SessionMessage): SessionMessage {
+  const message: SessionMessage = {
+    role: a.role,
+    text: [a.text, b.text].filter((t) => t.length > 0).join('\n\n'),
+    toolUses: [...a.toolUses, ...b.toolUses],
+  };
+  const results = [...(a.toolResults ?? []), ...(b.toolResults ?? [])];
+  if (results.length > 0) message.toolResults = results;
+  return message;
+}
+
+/**
+ * The tool ids a list breaks the API's rule on: a call its very next message
+ * does not answer, and a result that answers no call of the message right
+ * before it. The hook hands back no list with one.
+ */
+export function unpairedTools(messages: readonly SessionMessage[]): string[] {
+  const breaches = new Set<string>();
+  messages.forEach((m, i) => {
+    const next = messages[i + 1];
+    const answered = new Set(next?.role === 'user' ? (next.toolResults ?? []).map((r) => r.tool_use_id) : []);
+    for (const t of m.toolUses) if (m.role !== 'assistant' || !answered.has(t.tool_use_id)) breaches.add(t.tool_use_id);
+    const prev = messages[i - 1];
+    const asked = new Set(prev?.role === 'assistant' ? prev.toolUses.map((t) => t.tool_use_id) : []);
+    for (const r of m.toolResults ?? []) if (m.role !== 'user' || !asked.has(r.tool_use_id)) breaches.add(r.tool_use_id);
+  });
+  return [...breaches];
 }
 
 export type SessionCompaction = {
@@ -727,6 +762,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
         via: report.via ?? null,
         putBackChars,
       });
+      const unpaired = unpairedTools(out);
+      if (unpaired.length > 0) {
+        notify(
+          $,
+          `fallback to built-in summary (the history to hand back would leave ${unpaired.length} tool call(s) without their result in the next message: ${unpaired.slice(0, 5).join(', ')}${unpaired.length > 5 ? ', ...' : ''}; ${summarize(result)})`,
+        );
+        return next(event);
+      }
       if (ratio < config.minReductionRatio) {
         notify(
           $,

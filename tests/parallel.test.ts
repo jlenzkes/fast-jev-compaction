@@ -2,11 +2,15 @@
 // writes one record per tool_use block, so one assistant turn that made three
 // calls is listed as three assistant messages, then three tool-result messages.
 // A message the hook hands back without a handle is built afresh, with an id of
-// its own, so the host no longer joins the three; before each request it pairs
-// an assistant message's calls with the message right after it only, and fills
-// every call not answered there with "[Tool result missing due to internal
-// error]". The model then reads a call that succeeded as one that failed.
+// its own, so the host no longer joins the three (it joins consecutive user
+// messages, not these); before each request it pairs an assistant message's
+// calls with the message right after it only, and fills every call not
+// answered there with "[Tool result missing due to internal error]". The model
+// then reads a call that succeeded as one that failed. The tests hold the
+// handed-back list to the API's own rule, which needs no help from the host:
+// every call answered in the very next message.
 import { describe, expect, it } from 'vitest';
+import * as hook from '../hooks/fast-jev.ts';
 import { harness, message, result, type SessionMessage, uuid } from './harness.ts';
 
 const RESULT = 'y'.repeat(3000);
@@ -94,5 +98,77 @@ describe('parallel tool calls in a compacted history', () => {
     expect(unpaired(second)).toEqual({ unanswered: [], orphaned: [] });
     const ids = second.flatMap((m) => [...m.toolUses.map((t) => t.tool_use_id), ...(m.toolResults ?? []).map((r) => r.tool_use_id)]);
     expect(ids).toEqual([]);
+  });
+});
+
+// Text between a turn's results, and lists the API rule cannot be met for.
+const STUB = '[fast-jev-compaction stub]';
+const BIG = 'z'.repeat(20_000);
+/** A call an earlier compaction cut to a stub; `text` on its result message. */
+const oldUse = (id: string) => use(id, STUB);
+const oldResult = (id: string, text = '') => message('user', text, { toolResults: [{ tool_use_id: id, text: STUB, isError: false }] });
+const bare = (m: SessionMessage): SessionMessage => ({ ...m, handle: undefined });
+/** A large call to cut first (t1), so a compaction saves well past the 25% minimum. */
+const opening = (): SessionMessage[] => [message('user', 'Start.'), use('big', BIG), result('big', BIG)];
+
+describe('text between a turn\'s results', () => {
+  it('keeps the words of a result message whose old stub was deleted, after the turn\'s results, not between them', async () => {
+    const h = harness({ minReductionRatio: 0.25 });
+    // t1 big: stubbed; t3 b: an old stub, deleted (stub_dropped); a and c kept.
+    h.jev((key) => (/_t[13]$/.test(key) ? 0.1 : 0.9));
+    const out = await h.compact([...opening(), use('a'), oldUse('b'), use('c'), result('a', RESULT), oldResult('b', 'Words that must stay.'), result('c', RESULT), message('user', 'End.')]);
+    expect(h.fallbacks).toHaveLength(0);
+    expect(h.toasts.at(-1)).toMatch(/1 stub_dropped/);
+    expect(unpaired(out)).toEqual({ unanswered: [], orphaned: [] });
+    const at = out.findIndex((m) => m.toolUses.some((t) => t.tool_use_id === 'a'));
+    expect(out[at]!.toolUses.map((t) => t.tool_use_id)).toEqual(['a', 'c']);
+    expect(out[at + 1]!.toolResults!.map((r) => r.tool_use_id)).toEqual(['a', 'c']);
+    expect(out[at + 2]).toMatchObject({ role: 'user', text: 'Words that must stay.', toolUses: [] });
+    expect(out[at + 2]!.toolResults).toBeUndefined();
+  });
+
+  it('moves a handleless text message from between results to after them, as the same object', () => {
+    const words = bare(message('user', '  exact bytes\n\n'));
+    const out = hook.joinToolRounds([bare(use('a')), bare(use('b')), bare(result('a', RESULT)), words, bare(result('b', RESULT))]);
+    expect(unpaired(out)).toEqual({ unanswered: [], orphaned: [] });
+    expect(out).toHaveLength(3);
+    expect(out[2]).toBe(words);
+  });
+
+  it('falls back rather than move or merge a typed user message listed inside a turn', async () => {
+    const h = harness({ minReductionRatio: 0.25 });
+    h.jev((key) => (key.endsWith('_t1') ? 0.1 : 0.9));
+    const typed = message('user', 'Stop after this one.');
+    const out = await h.compact([...opening(), use('a'), use('b'), typed, result('a', RESULT), result('b', RESULT), message('user', 'End.')]);
+    expect(h.fallbacks).toHaveLength(1);
+    expect(h.fallbacks[0]!.messages).toContain(typed);
+    expect(h.toasts.at(-1)).toMatch(/^fallback to built-in summary \(the history to hand back would leave 2 tool call\(s\) without their result in the next message: a, b;/);
+    expect(out.map((m) => m.text)).toEqual(['BUILT-IN SUMMARY']);
+  });
+});
+
+describe('lists that break the rule whatever is joined', () => {
+  it('falls back when the list ends with a call that has no result', async () => {
+    const h = harness({ minReductionRatio: 0.25 });
+    h.jev(() => 0.1);
+    const pending = message('assistant', '', { toolUses: [{ tool_use_id: 'last', tool: 'Read', input: { file_path: 'x' } }] });
+    await h.compact([...opening(), message('assistant', 'Next.'), pending]);
+    expect(h.fallbacks).toHaveLength(1);
+    expect(h.toasts.at(-1)).toMatch(/without their result in the next message: last;/);
+  });
+
+  it('falls back when the list starts with a result that answers no call', async () => {
+    const h = harness({ minReductionRatio: 0.25 });
+    h.jev(() => 0.1);
+    await h.compact([result('first', 'r'), ...opening(), message('assistant', 'Done.'), message('user', 'End.')]);
+    expect(h.fallbacks).toHaveLength(1);
+    expect(h.toasts.at(-1)).toMatch(/without their result in the next message: first;/);
+  });
+
+  it('names a turn split by a message with a handle, which is never joined', () => {
+    const split = hook.joinToolRounds([bare(use('a')), use('b'), bare(use('c')), bare(result('a', RESULT)), bare(result('b', RESULT)), bare(result('c', RESULT))]);
+    expect(hook.unpairedTools?.(split)).toEqual(['a', 'b']);
+    const results = hook.joinToolRounds([bare(use('a')), bare(use('b')), bare(use('c')), bare(result('a', RESULT)), result('b', RESULT), bare(result('c', RESULT))]);
+    expect(hook.unpairedTools?.(results)).toEqual(['b', 'c']);
   });
 });
